@@ -1,0 +1,23 @@
+[2025-11-29T14:39:38.312Z] [INFO] ================================================
+[2025-11-29T14:39:38.312Z] [INFO] 🚀 START: fixMissingCategoriesFastkoSuperFast (memory-first, max speed)
+[2025-11-29T14:39:38.313Z] [DEBUG] Batch write size = 100
+[2025-11-29T14:39:38.313Z] [DEBUG] Verbose logging = true
+[2025-11-29T14:39:38.313Z] [INFO] ================================================
+[2025-11-29T14:39:38.313Z] [INFO] 📥 Loading product_list SKUs with empty category_class...
+[2025-11-29T14:39:38.333Z] [INFO] 🔍 Missing category SKUs found: 0
+[2025-11-29T14:39:38.333Z] [INFO] 📥 Preloading product_list existing categories into memory...
+[2025-11-29T14:39:38.339Z] [INFO] ✔ product_list categories loaded: 0
+[2025-11-29T14:39:38.339Z] [INFO] 📥 Loading distributor collections into memory (INGRAM, D&H, SUPPLIES, SYNNEX)...
+[2025-11-29T14:39:48.562Z] [INFO] ✔ Ingram loaded: skuMap=1020462 groupMap=17989
+[2025-11-29T14:39:48.938Z] [INFO] ✔ D&H loaded: skuMap=46524 groupMap=957
+[2025-11-29T14:39:49.152Z] [INFO] ✔ Supplies loaded: skuMap=23276 groupMap=2853
+[2025-11-29T14:40:14.973Z] [INFO] ✔ Synnex loaded: skuMap=1619956 groupMap=6938
+[2025-11-29T14:40:14.973Z] [INFO] ✔ All distributor collections loaded into memory.
+[2025-11-29T14:40:14.973Z] [INFO] 🔁 Processing missing SKUs (Ingram -> D&H -> Supplies -> Synnex) ...
+[2025-11-29T14:40:14.973Z] [INFO] ========== SUMMARY ==========
+[2025-11-29T14:40:14.973Z] [INFO] Total missing SKUs: 0
+[2025-11-29T14:40:14.973Z] [INFO] Processed SKUs: 0
+[2025-11-29T14:40:14.973Z] [INFO] Updated SKUs: 0
+[2025-11-29T14:40:14.973Z] [INFO] Elapsed time (s): 36.66
+[2025-11-29T14:40:14.973Z] [INFO] ================================================
+
