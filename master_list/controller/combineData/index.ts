@@ -2,55 +2,12 @@ import path from "path";
 import XLSX from "xlsx";
 import { Request, Response } from "express";
 import { getDb } from "../../config/mongdodb.config";
+import { cleanString, normalizeManufacturer, normalizeUpc as normalizeUPC, normalizeSku } from "../../utils/normalize";
 // ---------------- CONFIG ----------------
 const INSERT_BATCH = 20000;
 const LOG_INTERVAL = 200000;
 
 const MANU_FILE = path.join(process.cwd(), "src/raw", "manufacturer report.xlsx");
-
-// ====================================================================
-// UTIL: Clean string — remove quotes, trim, collapse multi-space
-// Returns '' (empty string) if input becomes empty
-// ====================================================================
-function cleanString(val: any): string {
-    if (val === null || val === undefined) return "";
-    let s = val.toString();
-    // remove all double quotes, single quotes that appear around values
-    s = s.replace(/["']/g, "");
-    // collapse whitespace and trim
-    s = s.replace(/\s+/g, " ").trim();
-    return s;
-}
-
-// ====================================================================
-// BEST FIX NORMALIZATION FUNCTION (uses cleanString)
-// ====================================================================
-function normalizeManufacturer(str: string): string {
-    const cleaned = cleanString(str);
-    if (!cleaned) return "";
-    return cleaned
-        .toLowerCase()
-        .replace(/[^a-z0-9 ]/g, "")   // remove punctuation
-        .replace(/\s+/g, " ")         // collapse spaces
-        .trim();
-}
-
-// ====================================================================
-// NORMALIZE UPC (remove non-digits + trim leading zeros)
-// Accepts raw value (string|number) — uses cleanString first
-// Returns null when no valid digits
-// ====================================================================
-function normalizeUPC(raw: any): string | null {
-    if (raw === null || raw === undefined) return null;
-    const cleaned = cleanString(raw);
-    if (!cleaned) return null;
-
-    // keep digits only
-    let upc = cleaned.replace(/[^0-9]/g, "");
-    // remove leading zeros
-    upc = upc.replace(/^0+/, "");
-    return upc.length > 0 ? upc : null;
-}
 
 // ====================================================================
 // STEP 1 — Load Manufacturer Map (Normalized Keys)
@@ -99,10 +56,11 @@ export async function runMergeSuperFast() {
         { name: "dist_almo_raw", distributor: "almo" }  // ✅ ADDED
     ];
 
-    // Reset output collection
-    await db.dropCollection("dist_combined_raw").catch(() => { });
-    await db.createCollection("dist_combined_raw");
-    const combined = db.collection("dist_combined_raw");
+    // Use a staging collection, then rename atomically to avoid drop+insert race
+    const stagingName = "dist_combined_raw_staging";
+    await db.dropCollection(stagingName).catch(() => { });
+    await db.createCollection(stagingName);
+    const combined = db.collection(stagingName);
 
     let insertedTotal = 0;
     let processedTotal = 0;
@@ -128,8 +86,8 @@ export async function runMergeSuperFast() {
             const normManufacturer = normalizeManufacturer(rawManufacturer);
             const manufacturer_mapped = manufacturerMap[normManufacturer] || null;
 
-            // === SKU normalization (keep only alphanumeric, upper-case optional) ===
-            const normalized_sku = rawSku ? rawSku.replace(/[^a-zA-Z0-9]/g, "") : "";
+            // === SKU normalization ===
+            const normalized_sku = rawSku ? normalizeSku(rawSku) : "";
 
             // === UPC normalization ===
             const normalized_upc = normalizeUPC(rawUpc);
@@ -177,12 +135,24 @@ export async function runMergeSuperFast() {
         console.log(`✔ Completed ${dist.name}: ${count} rows`);
     }
 
-    // Build indexes
+    // Build indexes on staging collection
     await combined.createIndex({ sku: 1 });
     await combined.createIndex({ normalized_sku: 1 });
     await combined.createIndex({ normalized_upc: 1 });
 
-    console.log("✔ Indexes created");
+    console.log("✔ Indexes created on staging collection");
+
+    // Atomically swap staging → production
+    // NOTE: renameCollection requires dbAdmin or dbOwner role on the MongoDB user.
+    // If this fails with an auth error, grant the role or fall back to drop+rename manually.
+    await db.dropCollection("dist_combined_raw").catch(() => { });
+    await db.admin().command({
+        renameCollection: `${db.databaseName}.${stagingName}`,
+        to: `${db.databaseName}.dist_combined_raw`,
+        dropTarget: true,
+    });
+
+    console.log("✔ Staging collection renamed to dist_combined_raw");
 
     console.log("=================================================");
     console.log("🎉 MERGE COMPLETED (BEST MATCH + NORMALIZED UPC)");

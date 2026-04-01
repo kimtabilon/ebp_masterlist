@@ -62,13 +62,26 @@ export async function generateProdLIst() {
         await measure("downloadRaw", () => downloadRaw());
 
         await measure("parallel imports", async () => {
-          await Promise.all([
-            runSynnex().catch(err => console.error("Synnex error:", err)),
-            importAlmoRaw().catch(err => console.error("Almo error:", err)),
-            runIngram().catch(err => console.error("Ingram error:", err)),
-            runDandH().catch(err => console.error("D&H error:", err)),
-            runSupplies().catch(err => console.error("Supplies error:", err)),
+          const importResults = await Promise.allSettled([
+            runSynnex(),
+            importAlmoRaw(),
+            runIngram(),
+            runDandH(),
+            runSupplies(),
           ]);
+
+          const names = ["Synnex", "Almo", "Ingram", "D&H", "Supplies"];
+          const failures: string[] = [];
+          importResults.forEach((r, i) => {
+            if (r.status === "rejected") {
+              console.error(`❌ ${names[i]} import FAILED:`, r.reason);
+              failures.push(names[i]);
+            }
+          });
+
+          if (failures.length > 0) {
+            throw new Error(`Pipeline aborted — distributor imports failed: ${failures.join(", ")}`);
+          }
         });
 
         await measure("runMergeSuperFast", () => runMergeSuperFast());
@@ -83,13 +96,26 @@ export async function generateProdLIst() {
         await measure("buildGroupedUpcData", () => buildGroupedUpcData());
 
         await measure("parallel response table builds", async () => {
-          const results = await Promise.all([
-            buildSynnexResponseTable().catch(err => ({ error: err, name: "Synnex" })),
-            buildIngramResponseTable().catch(err => ({ error: err, name: "Ingram" })),
-            buildDandHResponseTable().catch(err => ({ error: err, name: "D&H" })),
-            buildSuppliesNetworkResponseTable().catch(err => ({ error: err, name: "Supplies" })),
-            buildAlmoResponseTable().catch(err => ({ error: err, name: "Almo" })),
+          const responseResults = await Promise.allSettled([
+            buildSynnexResponseTable(),
+            buildIngramResponseTable(),
+            buildDandHResponseTable(),
+            buildSuppliesNetworkResponseTable(),
+            buildAlmoResponseTable(),
           ]);
+
+          const responseNames = ["Synnex", "Ingram", "D&H", "Supplies", "Almo"];
+          const responseFailures: string[] = [];
+          responseResults.forEach((r, i) => {
+            if (r.status === "rejected") {
+              console.error(`❌ ${responseNames[i]} response table build FAILED:`, r.reason);
+              responseFailures.push(responseNames[i]);
+            }
+          });
+
+          if (responseFailures.length > 0) {
+            console.error(`⚠️ Response table builds failed: ${responseFailures.join(", ")} — continuing with available data`);
+          }
         });
 
         await measure("buildProductList", () => buildProductList());
@@ -100,9 +126,17 @@ export async function generateProdLIst() {
         // await measure("fixMissingCategoriesFastko (again)", () => fixMissingCategoriesFastko());
         await measure("processBundlesMongo", () => processBundlesMongo());
 
-        axios.get(`https://console.ecommercebusinessprime.com/api/marketplace/updateInventory`);
-        axios.get(`https://console.ecommercebusinessprime.com/api/marketplace/updateWalmartInventory`);
-        axios.post(`https://console.ecommercebusinessprime.com/api/newegg/updateInventory`); 
+        await Promise.all([
+            axios.get(`https://console.ecommercebusinessprime.com/api/marketplace/updateInventory`)
+                .then(() => console.log("✅ Webhook: updateInventory sent"))
+                .catch((err: any) => console.error("❌ Webhook: updateInventory failed:", err?.message)),
+            axios.get(`https://console.ecommercebusinessprime.com/api/marketplace/updateWalmartInventory`)
+                .then(() => console.log("✅ Webhook: updateWalmartInventory sent"))
+                .catch((err: any) => console.error("❌ Webhook: updateWalmartInventory failed:", err?.message)),
+            axios.post(`https://console.ecommercebusinessprime.com/api/newegg/updateInventory`)
+                .then(() => console.log("✅ Webhook: updateNeweggInventory sent"))
+                .catch((err: any) => console.error("❌ Webhook: updateNeweggInventory failed:", err?.message)),
+        ]);
         
         /*await downloadRaw()
         await Promise.all([
@@ -135,7 +169,8 @@ export async function generateProdLIst() {
         await syncMongoToMysql()*/
         return ("generateProdLIst1 DONE")
     } catch (e: any) {
-        return (e)
+        console.error("❌ [generateProdLIst] Pipeline failed:", e?.message || e);
+        throw e;
     }
 }
 

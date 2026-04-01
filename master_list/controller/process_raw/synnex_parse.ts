@@ -176,7 +176,10 @@ async function buildBuffer(categoryMap: any) {
         count++;
     }
 
-    out.end();
+    await new Promise<void>((resolve, reject) => {
+        out.end(() => resolve());
+        out.on("error", reject);
+    });
     console.log(`📁 Buffer written: ${bufferFile} — ${count} rows`);
     return count;
 }

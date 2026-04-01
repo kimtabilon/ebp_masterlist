@@ -133,7 +133,10 @@ async function buildDandHBuffer(categoryMap: any) {
         count++;
     }
 
-    out.end();
+    await new Promise<void>((resolve, reject) => {
+        out.end(() => resolve());
+        out.on("error", reject);
+    });
 
     console.log(`📁 Buffer created: ${bufferFile}`);
     console.log(`📊 Parsed: ${count} rows`);

@@ -100,7 +100,10 @@ async function buildIngramBuffer() {
         count++;
     }
 
-    out.end();
+    await new Promise<void>((resolve, reject) => {
+        out.end(() => resolve());
+        out.on("error", reject);
+    });
     console.log(`📁 Buffer written: ${bufferFile}`);
     console.log(`📊 Total rows parsed: ${count}`);
 

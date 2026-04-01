@@ -1,19 +1,10 @@
 import axios from "axios";
 import { getDb } from "../../config/mongdodb.config";
 import { fixMissingCategoriesFast } from "../prod_category/missingcategoryUpdate";
+import { cleanString, normalizeSku } from "../../utils/normalize";
 
 const MIN_WAREHOUSE_QTY = 5;
 const MIN_TOTAL_WAREHOUSE_QTY = 20;
-
-function cleanString(val: any): string {
-  if (val === null || val === undefined) return "";
-  return String(val).replace(/["']/g, "").replace(/\s+/g, " ").trim();
-}
-
-function normalizeSku(sku: any): string {
-  const cleaned = cleanString(sku);
-  return cleaned.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-}
 
 function detectCondition(name: any): "refurbished" | "new" {
   const s = cleanString(name).toLowerCase();

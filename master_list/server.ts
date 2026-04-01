@@ -7,7 +7,22 @@ import cron from "node-cron";
 //test
 const PORT = 5003;
 
-cron.schedule("0 */2 * * *", async () => { try { await generateProdLIst(); } catch (err: any) { console.error("❌ [CRON] Error:", err.message); } });
+let pipelineRunning = false;
+
+cron.schedule("0 */2 * * *", async () => {
+    if (pipelineRunning) {
+        console.warn("⚠️ [CRON] Pipeline still running from previous invocation — skipping this run.");
+        return;
+    }
+    pipelineRunning = true;
+    try {
+        await generateProdLIst();
+    } catch (err: any) {
+        console.error("❌ [CRON] Error:", err.message);
+    } finally {
+        pipelineRunning = false;
+    }
+});
 
 app.listen(PORT, () => {
     //sync
