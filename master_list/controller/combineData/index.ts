@@ -1,3 +1,4 @@
+import fs from "fs";
 import path from "path";
 import XLSX from "xlsx";
 import { Request, Response } from "express";
@@ -15,9 +16,17 @@ const MANU_FILE = path.join(process.cwd(), "src/raw", "manufacturer report.xlsx"
 function loadManufacturerMap() {
     console.log("📖 Loading manufacturer_report.xlsx...");
 
+    if (!fs.existsSync(MANU_FILE)) {
+        throw new Error(`❌ Manufacturer map file not found: ${MANU_FILE} — pipeline cannot proceed without it.`);
+    }
+
     const workbook = XLSX.readFile(MANU_FILE);
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows: any[] = XLSX.utils.sheet_to_json(sheet);
+
+    if (!rows.length) {
+        throw new Error(`❌ Manufacturer map file is empty: ${MANU_FILE} — pipeline cannot proceed without mappings.`);
+    }
 
     const map: Record<string, string | null> = {};
 
@@ -33,6 +42,10 @@ function loadManufacturerMap() {
         const key = normalizeManufacturer(manufacturerExcel);
         map[key] = mapped;
     });
+
+    if (Object.keys(map).length === 0) {
+        throw new Error(`❌ Manufacturer map produced 0 valid mappings from ${MANU_FILE} — check file format.`);
+    }
 
     console.log(`✔ Loaded ${Object.keys(map).length} manufacturer mappings`);
     return map;

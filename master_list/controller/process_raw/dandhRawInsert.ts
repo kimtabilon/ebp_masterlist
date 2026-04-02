@@ -262,6 +262,9 @@ export async function runDandH() {
 
     const inserted = await insertDandHBuffer();
 
+    // Clean up buffer file after successful ingestion
+    if (fs.existsSync(bufferFile)) fs.unlinkSync(bufferFile);
+
     console.log("=================================================");
     console.log("✅ D&H IMPORT COMPLETE");
     console.log("Parsed:", parsed);

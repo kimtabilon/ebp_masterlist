@@ -436,6 +436,9 @@ export async function runSynnex() {
 
     await rebuildIndex();
 
+    // Clean up buffer file after successful ingestion
+    if (fs.existsSync(bufferFile)) fs.unlinkSync(bufferFile);
+
     console.log("=================================================");
     console.log("✔ SYNNEX IMPORT DONE");
     console.log("Parsed:", parsed);

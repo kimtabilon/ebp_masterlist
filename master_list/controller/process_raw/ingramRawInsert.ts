@@ -262,6 +262,9 @@ export async function runIngram() {
     const removed = await removeDuplicates();
     await rebuildIndex();
 
+    // Clean up buffer file after successful ingestion
+    if (fs.existsSync(bufferFile)) fs.unlinkSync(bufferFile);
+
     console.log("=================================================");
     console.log("✅ INGRAM IMPORT COMPLETED");
     console.log("Parsed:", parsed);

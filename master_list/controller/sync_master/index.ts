@@ -160,85 +160,91 @@ export async function syncMongoToMysql() {
     const BATCH_SIZE = 5000;
     let batch: any[] = [];
 
-    while (await cursor.hasNext()) {
-        const doc: any = await cursor.next();
+    await conn.beginTransaction();
 
-        const rawSku = doc.sku?.toString().trim() || null;
-        if (!rawSku) continue;
+    try {
+        while (await cursor.hasNext()) {
+            const doc: any = await cursor.next();
 
-        const normalizedSku =
-            doc.normalized_sku || rawSku.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+            const rawSku = doc.sku?.toString().trim() || null;
+            if (!rawSku) continue;
 
-        const synnex = synnexCache.get(rawSku);
-        const dandh = dandhCache.get(rawSku);
-        const supplies = suppliesCache.get(rawSku);
+            const normalizedSku =
+                doc.normalized_sku || rawSku.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
 
-        const { ingram_map, ingram_msrp } = extractIngramMapMsrp(doc.ingram_response);
+            const synnex = synnexCache.get(rawSku);
+            const dandh = dandhCache.get(rawSku);
+            const supplies = suppliesCache.get(rawSku);
 
-        // ✅ NEW: name from product_list
-        const name = (doc.name ?? null) ? String(doc.name).trim() : null;
+            const { ingram_map, ingram_msrp } = extractIngramMapMsrp(doc.ingram_response);
 
-        batch.push([
-            rawSku,
-            normalizedSku,
+            const name = (doc.name ?? null) ? String(doc.name).trim() : null;
 
-            // ✅ NEW FIELD (must match MySQL insert column order)
-            name,
+            batch.push([
+                rawSku,
+                normalizedSku,
+                name,
+                doc.upc || null,
+                cleanManufacturerMap(doc.manufacturer_map),
+                formatDistributorList(doc.distributor_list),
 
-            doc.upc || null,
-            cleanManufacturerMap(doc.manufacturer_map),
-            formatDistributorList(doc.distributor_list),
+                doc.synnex_response || null,
+                toTwoDecimals(doc.synnex_price),
+                doc.synnex_quantity ?? 0,
+                synnex?.map ?? 0,
+                synnex?.msrp ?? 0,
 
-            doc.synnex_response || null,
-            toTwoDecimals(doc.synnex_price),
-            doc.synnex_quantity ?? 0,
-            synnex?.map ?? 0,
-            synnex?.msrp ?? 0,
+                doc.ingram_response || null,
+                toTwoDecimals(doc.ingram_price),
+                doc.ingram_quantity ?? 0,
+                ingram_map,
+                ingram_msrp,
 
-            doc.ingram_response || null,
-            toTwoDecimals(doc.ingram_price),
-            doc.ingram_quantity ?? 0,
-            ingram_map,
-            ingram_msrp,
+                doc.dandh_response || null,
+                toTwoDecimals(doc.dandh_price),
+                doc.dandh_quantity ?? 0,
+                dandh?.map ?? 0,
+                dandh?.msrp ?? 0,
 
-            doc.dandh_response || null,
-            toTwoDecimals(doc.dandh_price),
-            doc.dandh_quantity ?? 0,
-            dandh?.map ?? 0,
-            dandh?.msrp ?? 0,
+                doc.supplies_response || null,
+                toTwoDecimals(doc.supplies_price),
+                doc.supplies_count ?? 0,
+                supplies?.map ?? 0,
+                supplies?.msrp ?? 0,
 
-            doc.supplies_response || null,
-            toTwoDecimals(doc.supplies_price),
-            doc.supplies_count ?? 0,
-            supplies?.map ?? 0,
-            supplies?.msrp ?? 0,
+                (doc.synnex_quantity ?? 0) +
+                (doc.ingram_quantity ?? 0) +
+                (doc.dandh_quantity ?? 0) +
+                (doc.supplies_count ?? 0),
 
-            (doc.synnex_quantity ?? 0) +
-            (doc.ingram_quantity ?? 0) +
-            (doc.dandh_quantity ?? 0) +
-            (doc.supplies_count ?? 0),
+                doc.condition || "new",
+                doc.category_class || null,
+                doc.category_class_l2 || null,
+                doc.category_class_l3 || null,
+                doc.priority || null,
+                doc.created_at || new Date(),
+                doc.updated_at || new Date(),
+            ]);
 
-            doc.condition || "new",
-            doc.category_class || null,
-            doc.category_class_l2 || null,
-            doc.category_class_l3 || null,
-            doc.priority || null,
-            doc.created_at || new Date(),
-            doc.updated_at || new Date(),
-        ]);
-
-        if (batch.length >= BATCH_SIZE) {
-            await upsertBatch(conn, batch);
-            batch = [];
+            if (batch.length >= BATCH_SIZE) {
+                await upsertBatch(conn, batch);
+                batch = [];
+            }
         }
-    }
 
-    if (batch.length) {
-        await upsertBatch(conn, batch);
-    }
+        if (batch.length) {
+            await upsertBatch(conn, batch);
+        }
 
-    await conn.end();
-    console.log("🎉 Sync complete");
+        await conn.commit();
+        console.log("🎉 Sync complete (transaction committed)");
+    } catch (err) {
+        await conn.rollback();
+        console.error("❌ MySQL sync failed — transaction rolled back:", err);
+        throw err;
+    } finally {
+        await conn.end();
+    }
 }
 
 async function buildDistCache(db: any, collection: string) {

@@ -569,6 +569,12 @@ export async function buildProductList() {
   }
   console.timeEnd("namemaps");
 
+  // Release name maps — no longer needed after this point
+  for (const k in synNames) delete synNames[k];
+  for (const k in dNames) delete dNames[k];
+  for (const k in iNames) delete iNames[k];
+  for (const k in sNames) delete sNames[k];
+
   console.log("UPC / SKU duplicate cleanup...");
   console.time("duplicatecleanup");
   // UPC / SKU duplicate cleanup (keep your existing logic)
@@ -600,6 +606,9 @@ export async function buildProductList() {
   for (const key of remove) delete merged[key];
 
   const allDocs = Object.values(merged);
+
+  // Release merged object — allDocs holds the references now
+  for (const k in merged) delete merged[k];
 
   const BATCH_INSERT = 10000;
   let inserted = 0;
