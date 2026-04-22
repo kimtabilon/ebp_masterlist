@@ -23,6 +23,7 @@ import { syncMongoToMysql } from "./sync_master"
 import { validateProductList, promoteProductList, rollbackProductList } from "./validation/validateProductList"
 import { diffProductList } from "./validation/diffProductList"
 import { PipelineRunCollector } from "./validation/pipelineRunLog"
+import { sendPipelineAlert } from "./validation/alerting"
 
 import { getDb } from "../config/mongdodb.config";
 
@@ -152,6 +153,7 @@ export async function generateProdLIst() {
             console.error("❌ Validation FAILED — rolling back to previous product list");
             await rollbackProductList();
             await runLog.persist({ status: "rolled_back", validation, error: "Validation failed" });
+            await sendPipelineAlert({ type: "validation_failed", validation });
             throw new Error(`Product list validation failed: ${validation.checks.filter(c => !c.passed).map(c => c.name).join(", ")}`);
         }
 
@@ -216,6 +218,7 @@ export async function generateProdLIst() {
     } catch (e: any) {
         console.error("❌ [generateProdLIst] Pipeline failed:", e?.message || e);
         await runLog.persist({ status: "failed", error: e?.message || String(e) }).catch(() => {});
+        await sendPipelineAlert({ type: "pipeline_error", error: e?.message || String(e) }).catch(() => {});
         throw e;
     }
 }
