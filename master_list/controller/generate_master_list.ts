@@ -20,6 +20,7 @@ import { buildSuppliesNetworkResponseTable } from "./responseGather/suppliesNetw
 import { buildSynnexResponseTable } from "./responseGather/synnexResponse.controller"
 import { processBundlesMongo } from "./sku_packed"
 import { syncMongoToMysql } from "./sync_master"
+import { validateProductList, promoteProductList, rollbackProductList } from "./validation/validateProductList"
 
 import { getDb } from "../config/mongdodb.config";
 
@@ -118,13 +119,40 @@ export async function generateProdLIst() {
           }
         });
 
-        await measure("buildProductList", () => buildProductList());
+        // Preserve current product_list as backup before rebuilding
+        const db = await getDb("master_list");
+        try {
+            await db.admin().command({
+                renameCollection: `${db.databaseName}.product_list`,
+                to: `${db.databaseName}.product_list_previous`,
+                dropTarget: true,
+            });
+            console.log("✅ Preserved current product_list as product_list_previous");
+        } catch {
+            console.log("ℹ️ No existing product_list to preserve (first run or already moved)");
+        }
 
-        // await measure("fixMissingCategoriesFast", () => fixMissingCategoriesFast());
-        // await measure("fixMissingCategoriesFastko", () => fixMissingCategoriesFastko());
-        // await measure("fixMissingCategoriesFast (again)", () => fixMissingCategoriesFast());
-        // await measure("fixMissingCategoriesFastko (again)", () => fixMissingCategoriesFastko());
+        await measure("buildProductList", () => buildProductList());
         await measure("processBundlesMongo", () => processBundlesMongo());
+
+        // Validate the new product list before promoting
+        const validation = await measure("validateProductList", () => validateProductList());
+
+        console.log("=================================================");
+        console.log("VALIDATION RESULTS:");
+        for (const check of validation.checks) {
+            console.log(`  ${check.passed ? "✅" : "❌"} ${check.name}: ${check.detail}`);
+        }
+        console.log("=================================================");
+
+        if (!validation.passed) {
+            console.error("❌ Validation FAILED — rolling back to previous product list");
+            await rollbackProductList();
+            throw new Error(`Product list validation failed: ${validation.checks.filter(c => !c.passed).map(c => c.name).join(", ")}`);
+        }
+
+        // Validation passed — drop the backup
+        await promoteProductList();
 
         await Promise.all([
             axios.get(`https://console.ecommercebusinessprime.com/api/marketplace/updateInventory`)
