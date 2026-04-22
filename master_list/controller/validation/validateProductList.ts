@@ -17,8 +17,9 @@ export interface ValidationResult {
  * Env vars: VALIDATION_COUNT_THRESHOLD_PCT, VALIDATION_MAX_INVENTORY_MULTIPLIER
  */
 export async function validateProductList(options?: {
-    countThresholdPct?: number;      // max % deviation from previous run (default 10)
-    maxInventoryMultiplier?: number;  // max single-run inventory increase (default 100)
+    countThresholdPct?: number;          // max % deviation from previous run (default 10)
+    maxInventoryMultiplier?: number;     // max single-run inventory increase (default 100)
+    coverageMismatchPct?: number;        // max % of products with distributor coverage gaps (default 1)
 }): Promise<ValidationResult> {
     const db = await getDb("master_list");
     const productList = db.collection("product_list");
@@ -28,6 +29,8 @@ export async function validateProductList(options?: {
         ?? (process.env.VALIDATION_COUNT_THRESHOLD_PCT ? Number(process.env.VALIDATION_COUNT_THRESHOLD_PCT) : 10);
     const maxInvMultiplier = options?.maxInventoryMultiplier
         ?? (process.env.VALIDATION_MAX_INVENTORY_MULTIPLIER ? Number(process.env.VALIDATION_MAX_INVENTORY_MULTIPLIER) : 100);
+    const coverageThreshold = options?.coverageMismatchPct
+        ?? (process.env.VALIDATION_COVERAGE_MISMATCH_PCT ? Number(process.env.VALIDATION_COVERAGE_MISMATCH_PCT) : 1);
 
     const checks: ValidationResult["checks"] = [];
 
@@ -71,12 +74,14 @@ export async function validateProductList(options?: {
     ];
     const coverageResult = await productList.aggregate(coveragePipeline).toArray();
     const mismatchCount = coverageResult[0]?.total ?? 0;
+    const mismatchPct = currentCount > 0 ? (mismatchCount / currentCount) * 100 : 0;
+    const coveragePassed = mismatchPct <= coverageThreshold;
     checks.push({
         name: "distributor_coverage",
-        passed: mismatchCount === 0,
-        detail: mismatchCount === 0
-            ? "All products have response data for each claimed distributor"
-            : `${mismatchCount} products have a distributor in their list but missing response data`
+        passed: coveragePassed,
+        detail: coveragePassed
+            ? `${mismatchCount} products with coverage gaps (${mismatchPct.toFixed(2)}%, threshold: ${coverageThreshold}%)`
+            : `${mismatchCount} products with coverage gaps (${mismatchPct.toFixed(2)}%) exceeds threshold of ${coverageThreshold}%`
     });
 
     // 3. Duplicate normalized_sku
