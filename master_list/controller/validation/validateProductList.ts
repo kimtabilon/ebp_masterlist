@@ -20,6 +20,7 @@ export async function validateProductList(options?: {
     countThresholdPct?: number;          // max % deviation from previous run (default 10)
     maxInventoryMultiplier?: number;     // max single-run inventory increase (default 100)
     coverageMismatchPct?: number;        // max % of products with distributor coverage gaps (default 1)
+    disabledChecks?: string[];           // check names to skip (e.g., ["distributor_coverage"])
 }): Promise<ValidationResult> {
     const db = await getDb("master_list");
     const productList = db.collection("product_list");
@@ -32,115 +33,130 @@ export async function validateProductList(options?: {
     const coverageThreshold = options?.coverageMismatchPct
         ?? (process.env.VALIDATION_COVERAGE_MISMATCH_PCT ? Number(process.env.VALIDATION_COVERAGE_MISMATCH_PCT) : 1);
 
+    const disabledChecks = new Set(
+        options?.disabledChecks
+        ?? (process.env.VALIDATION_DISABLED_CHECKS ? process.env.VALIDATION_DISABLED_CHECKS.split(",").map(s => s.trim()) : [])
+    );
+
     const checks: ValidationResult["checks"] = [];
+    const isEnabled = (name: string) => !disabledChecks.has(name);
 
     // 1. Product count vs previous run
     const currentCount = await productList.countDocuments();
     const previousCount = await previousList.countDocuments();
 
-    if (previousCount > 0) {
-        const pctChange = Math.abs(currentCount - previousCount) / previousCount * 100;
-        const countPassed = pctChange <= countThreshold;
-        checks.push({
-            name: "product_count",
-            passed: countPassed,
-            detail: countPassed
-                ? `Count ${currentCount} is within ${countThreshold}% of previous ${previousCount} (${pctChange.toFixed(1)}% change)`
-                : `Count ${currentCount} deviates ${pctChange.toFixed(1)}% from previous ${previousCount} (threshold: ${countThreshold}%)`
-        });
-    } else {
-        // No previous run to compare — pass by default (first run)
-        checks.push({
-            name: "product_count",
-            passed: true,
-            detail: `First run — no previous count to compare. Current count: ${currentCount}`
-        });
+    if (isEnabled("product_count")) {
+        if (previousCount > 0) {
+            const pctChange = Math.abs(currentCount - previousCount) / previousCount * 100;
+            const countPassed = pctChange <= countThreshold;
+            checks.push({
+                name: "product_count",
+                passed: countPassed,
+                detail: countPassed
+                    ? `Count ${currentCount} is within ${countThreshold}% of previous ${previousCount} (${pctChange.toFixed(1)}% change)`
+                    : `Count ${currentCount} deviates ${pctChange.toFixed(1)}% from previous ${previousCount} (threshold: ${countThreshold}%)`
+            });
+        } else {
+            checks.push({
+                name: "product_count",
+                passed: true,
+                detail: `First run — no previous count to compare. Current count: ${currentCount}`
+            });
+        }
     }
 
     // 2. Distributor coverage — products with a distributor in their list but null response
-    const coveragePipeline = [
-        {
-            $match: {
-                $or: [
-                    { distributor_list: "synnex", synnex_response: null },
-                    { distributor_list: "dandh", dandh_response: null },
-                    { distributor_list: "ingram", ingram_response: null },
-                    { distributor_list: "supplies", supplies_response: null },
-                    { distributor_list: "almo", almo_response: null },
-                ]
-            }
-        },
-        { $count: "total" }
-    ];
-    const coverageResult = await productList.aggregate(coveragePipeline).toArray();
-    const mismatchCount = coverageResult[0]?.total ?? 0;
-    const mismatchPct = currentCount > 0 ? (mismatchCount / currentCount) * 100 : 0;
-    const coveragePassed = mismatchPct <= coverageThreshold;
-    checks.push({
-        name: "distributor_coverage",
-        passed: coveragePassed,
-        detail: coveragePassed
-            ? `${mismatchCount} products with coverage gaps (${mismatchPct.toFixed(2)}%, threshold: ${coverageThreshold}%)`
-            : `${mismatchCount} products with coverage gaps (${mismatchPct.toFixed(2)}%) exceeds threshold of ${coverageThreshold}%`
-    });
-
-    // 3. Duplicate normalized_sku
-    const dupPipeline = [
-        { $group: { _id: "$normalized_sku", count: { $sum: 1 } } },
-        { $match: { count: { $gt: 1 } } },
-        { $count: "total" }
-    ];
-    const dupResult = await productList.aggregate(dupPipeline).toArray();
-    const dupCount = dupResult[0]?.total ?? 0;
-    checks.push({
-        name: "duplicate_sku",
-        passed: dupCount === 0,
-        detail: dupCount === 0
-            ? "No duplicate normalized_sku entries"
-            : `${dupCount} normalized_sku values appear more than once`
-    });
-
-    // 4. Inventory plausibility — no negative values
-    const negativePipeline = [
-        {
-            $match: {
-                $or: [
-                    { synnex_quantity: { $lt: 0 } },
-                    { dandh_quantity: { $lt: 0 } },
-                    { ingram_quantity: { $lt: 0 } },
-                    { supplies_count: { $lt: 0 } },
-                    { almo_quantity: { $lt: 0 } },
-                ]
-            }
-        },
-        { $count: "total" }
-    ];
-    const negResult = await productList.aggregate(negativePipeline).toArray();
-    const negCount = negResult[0]?.total ?? 0;
-    checks.push({
-        name: "inventory_plausibility",
-        passed: negCount === 0,
-        detail: negCount === 0
-            ? "No negative inventory values"
-            : `${negCount} products have negative inventory values`
-    });
-
-    // 5. Distributor minimums — each distributor contributes > 0 products
-    const distributors = ["synnex", "dandh", "ingram", "supplies", "almo"];
-    const missingDistributors: string[] = [];
-
-    for (const dist of distributors) {
-        const count = await productList.countDocuments({ distributor_list: dist });
-        if (count === 0) missingDistributors.push(dist);
+    if (isEnabled("distributor_coverage")) {
+        const coveragePipeline = [
+            {
+                $match: {
+                    $or: [
+                        { distributor_list: "synnex", synnex_response: null },
+                        { distributor_list: "dandh", dandh_response: null },
+                        { distributor_list: "ingram", ingram_response: null },
+                        { distributor_list: "supplies", supplies_response: null },
+                        { distributor_list: "almo", almo_response: null },
+                    ]
+                }
+            },
+            { $count: "total" }
+        ];
+        const coverageResult = await productList.aggregate(coveragePipeline).toArray();
+        const mismatchCount = coverageResult[0]?.total ?? 0;
+        const mismatchPct = currentCount > 0 ? (mismatchCount / currentCount) * 100 : 0;
+        const coveragePassed = mismatchPct <= coverageThreshold;
+        checks.push({
+            name: "distributor_coverage",
+            passed: coveragePassed,
+            detail: coveragePassed
+                ? `${mismatchCount} products with coverage gaps (${mismatchPct.toFixed(2)}%, threshold: ${coverageThreshold}%)`
+                : `${mismatchCount} products with coverage gaps (${mismatchPct.toFixed(2)}%) exceeds threshold of ${coverageThreshold}%`
+        });
     }
 
-    checks.push({
-        name: "distributor_minimums",
-        passed: missingDistributors.length === 0,
-        detail: missingDistributors.length === 0
-            ? "All 5 distributors contribute products"
-            : `Missing distributors: ${missingDistributors.join(", ")}`
-    });
+    // 3. Duplicate normalized_sku
+    if (isEnabled("duplicate_sku")) {
+        const dupPipeline = [
+            { $group: { _id: "$normalized_sku", count: { $sum: 1 } } },
+            { $match: { count: { $gt: 1 } } },
+            { $count: "total" }
+        ];
+        const dupResult = await productList.aggregate(dupPipeline).toArray();
+        const dupCount = dupResult[0]?.total ?? 0;
+        checks.push({
+            name: "duplicate_sku",
+            passed: dupCount === 0,
+            detail: dupCount === 0
+                ? "No duplicate normalized_sku entries"
+                : `${dupCount} normalized_sku values appear more than once`
+        });
+    }
+
+    // 4. Inventory plausibility — no negative values
+    if (isEnabled("inventory_plausibility")) {
+        const negativePipeline = [
+            {
+                $match: {
+                    $or: [
+                        { synnex_quantity: { $lt: 0 } },
+                        { dandh_quantity: { $lt: 0 } },
+                        { ingram_quantity: { $lt: 0 } },
+                        { supplies_count: { $lt: 0 } },
+                        { almo_quantity: { $lt: 0 } },
+                    ]
+                }
+            },
+            { $count: "total" }
+        ];
+        const negResult = await productList.aggregate(negativePipeline).toArray();
+        const negCount = negResult[0]?.total ?? 0;
+        checks.push({
+            name: "inventory_plausibility",
+            passed: negCount === 0,
+            detail: negCount === 0
+                ? "No negative inventory values"
+                : `${negCount} products have negative inventory values`
+        });
+    }
+
+    // 5. Distributor minimums — each distributor contributes > 0 products
+    if (isEnabled("distributor_minimums")) {
+        const distributors = ["synnex", "dandh", "ingram", "supplies", "almo"];
+        const missingDistributors: string[] = [];
+
+        for (const dist of distributors) {
+            const count = await productList.countDocuments({ distributor_list: dist });
+            if (count === 0) missingDistributors.push(dist);
+        }
+
+        checks.push({
+            name: "distributor_minimums",
+            passed: missingDistributors.length === 0,
+            detail: missingDistributors.length === 0
+                ? "All 5 distributors contribute products"
+                : `Missing distributors: ${missingDistributors.join(", ")}`
+        });
+    }
 
     const passed = checks.every(c => c.passed);
 

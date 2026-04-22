@@ -167,6 +167,13 @@ export async function generateProdLIst() {
         console.log(`  Distributor changes: ${diff.distributorChanges}`);
         console.log("=================================================");
 
+        // Alert on anomalous diff (large removals or widespread price changes)
+        if (diff.removed > 5000 || diff.priceChanges > 1000) {
+            await sendPipelineAlert({ type: "anomaly_detected", diff,
+                error: `Anomalous diff: ${diff.removed} products removed, ${diff.priceChanges} price changes`
+            });
+        }
+
         // Validation passed — drop the backup
         await promoteProductList();
 
