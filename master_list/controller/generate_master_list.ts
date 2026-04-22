@@ -21,6 +21,7 @@ import { buildSynnexResponseTable } from "./responseGather/synnexResponse.contro
 import { processBundlesMongo } from "./sku_packed"
 import { syncMongoToMysql } from "./sync_master"
 import { validateProductList, promoteProductList, rollbackProductList } from "./validation/validateProductList"
+import { diffProductList } from "./validation/diffProductList"
 
 import { getDb } from "../config/mongdodb.config";
 
@@ -150,6 +151,16 @@ export async function generateProdLIst() {
             await rollbackProductList();
             throw new Error(`Product list validation failed: ${validation.checks.filter(c => !c.passed).map(c => c.name).join(", ")}`);
         }
+
+        // Compute diff before dropping the backup (needs product_list_previous)
+        const diff = await measure("diffProductList", () => diffProductList());
+
+        console.log("=================================================");
+        console.log("RUN DIFF SUMMARY:");
+        console.log(`  Added: ${diff.added} | Removed: ${diff.removed}`);
+        console.log(`  Price changes: ${diff.priceChanges} | Inventory swings: ${diff.inventorySwings}`);
+        console.log(`  Distributor changes: ${diff.distributorChanges}`);
+        console.log("=================================================");
 
         // Validation passed — drop the backup
         await promoteProductList();
