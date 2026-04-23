@@ -816,7 +816,16 @@ async function processBatch(groups: any[], ctx: BatchContext): Promise<number> {
   const skus = groups.map(g => g.normalized_sku_list?.[0]).filter(Boolean);
   if (skus.length === 0) return 0;
 
-  // 1. Query all response tables for this batch of SKUs
+  // Collect raw SKU values for raw collection queries (they don't have normalized_sku field)
+  const rawSkuSet = new Set<string>();
+  for (const g of groups) {
+    for (const s of (g.sku_list || [])) {
+      if (s) rawSkuSet.add(s);
+    }
+  }
+  const rawSkus = [...rawSkuSet];
+
+  // 1. Query all response tables for this batch of SKUs (response tables have normalized_sku)
   const [synnexRows, dandhRows, ingramRows, suppliesRows, almoRows] = await Promise.all([
     ctx.synnexResp.find({ normalized_sku: { $in: skus } }).toArray(),
     ctx.dandhResp.find({ normalized_sku: { $in: skus } }).toArray(),
@@ -833,11 +842,12 @@ async function processBatch(groups: any[], ctx: BatchContext): Promise<number> {
   const almoMap = indexBy(almoRows, "normalized_sku");
 
   // 2. Query raw collections for names and categories
+  // Synnex raw has normalized_sku; D&H, Ingram, Supplies raw only have sku (raw format)
   const [synRaw, dnhRaw, ingRaw, supRaw] = await Promise.all([
     ctx.rawSynnex.find({ normalized_sku: { $in: skus } }, { projection: { normalized_sku: 1, sku: 1, name: 1, category_class: 1, category_class_l2: 1, category_class_l3: 1 } }).toArray(),
-    ctx.rawDandh.find({ normalized_sku: { $in: skus } }, { projection: { normalized_sku: 1, sku: 1, name: 1, category_class: 1, category_class_l2: 1, category_class_l3: 1 } }).toArray(),
-    ctx.rawIngram.find({ normalized_sku: { $in: skus } }, { projection: { normalized_sku: 1, sku: 1, name: 1 } }).toArray(),
-    ctx.rawSupplies.find({ normalized_sku: { $in: skus } }, { projection: { normalized_sku: 1, sku: 1, name: 1 } }).toArray(),
+    ctx.rawDandh.find({ sku: { $in: rawSkus } }, { projection: { sku: 1, name: 1, category_class: 1, category_class_l2: 1, category_class_l3: 1 } }).toArray(),
+    ctx.rawIngram.find({ sku: { $in: rawSkus } }, { projection: { sku: 1, name: 1 } }).toArray(),
+    ctx.rawSupplies.find({ sku: { $in: rawSkus } }, { projection: { sku: 1, name: 1 } }).toArray(),
   ]);
 
   // Name maps for this batch
