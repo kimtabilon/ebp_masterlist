@@ -2,6 +2,7 @@ import axios from "axios";
 import { getDb } from "../../config/mongdodb.config";
 import { fixMissingCategoriesFast } from "../prod_category/missingcategoryUpdate";
 import { cleanString, normalizeSku } from "../../utils/normalize";
+import { cleanupDuplicates } from "./duplicateCleanup";
 
 const MIN_WAREHOUSE_QTY = 5;
 const MIN_TOTAL_WAREHOUSE_QTY = 20;
@@ -784,6 +785,10 @@ export async function buildProductListStreaming() {
 
   console.timeEnd("StreamingBuild");
   console.log(`✅ Streaming build complete: ${processed} groups processed, ${inserted} products inserted`);
+
+  // Duplicate cleanup (runs against product_list in DB, no in-memory maps)
+  const { removed } = await cleanupDuplicates();
+  inserted -= removed;
 
   // Post-build steps (same as original)
   console.log("fixMissingCategoriesFastv3...");
