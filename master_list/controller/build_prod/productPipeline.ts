@@ -701,6 +701,304 @@ export async function buildProductList() {
 }
 
 /* =========================================================
+   STREAMING BUILD (EBP-12)
+   Cursor-based alternative to buildProductList() that processes
+   products in batches with constant memory usage.
+========================================================= */
+
+const STREAMING_BATCH_SIZE = parseInt(process.env.BUILD_BATCH_SIZE || "1000", 10);
+
+export async function buildProductListStreaming() {
+  console.log("=================================================");
+  console.log(`BUILD PRODUCT LIST (STREAMING, batch=${STREAMING_BATCH_SIZE})`);
+  console.log("\n\n");
+
+  const db = await getDb("master_list");
+  await db.dropCollection("product_list").catch(() => { });
+  await db.createCollection("product_list");
+
+  const productList = db.collection("product_list");
+  await productList.createIndex({ normalized_sku: 1 });
+  await productList.createIndex({ sku: 1 });
+
+  const now = new Date();
+  let inserted = 0;
+  let processed = 0;
+
+  // Ensure indexes exist on raw collections for batch lookups
+  const rawSynnex = db.collection("dist_synnex_raw");
+  const rawDandh = db.collection("dist_dandh_raw");
+  const rawIngram = db.collection("dist_ingram_raw");
+  const rawSupplies = db.collection("dist_supplies_raw");
+
+  await rawSynnex.createIndex({ normalized_sku: 1 });
+  await rawDandh.createIndex({ normalized_sku: 1 });
+  await rawIngram.createIndex({ normalized_sku: 1 });
+  await rawSupplies.createIndex({ normalized_sku: 1 });
+
+  // Response table collections
+  const synnexResp = db.collection("synnex_response_table");
+  const dandhResp = db.collection("dandh_response_table");
+  const ingramResp = db.collection("ingram_response_table");
+  const suppliesResp = db.collection("supplies_response_table");
+  const almoResp = db.collection("almo_response_table");
+
+  // Stream through grouped_upc_data in batches
+  const groupedCursor = db.collection("grouped_upc_data").find({}, {
+    projection: { normalized_sku_list: 1, sku_list: 1, upc: 1, normalized_upc: 1, canonical_manufacturer: 1, distributor_list: 1 }
+  });
+
+  let batch: any[] = [];
+
+  console.time("StreamingBuild");
+
+  while (await groupedCursor.hasNext()) {
+    const group: any = await groupedCursor.next();
+
+    const normalizedSku = group.normalized_sku_list?.[0];
+    if (!normalizedSku) continue;
+
+    batch.push(group);
+
+    if (batch.length >= STREAMING_BATCH_SIZE) {
+      inserted += await processBatch(batch, {
+        db, productList, now,
+        synnexResp, dandhResp, ingramResp, suppliesResp, almoResp,
+        rawSynnex, rawDandh, rawIngram, rawSupplies,
+      });
+      processed += batch.length;
+      if (processed % 10000 === 0) console.log(`  ... processed ${processed} groups, inserted ${inserted}`);
+      batch = [];
+    }
+  }
+
+  // Final batch
+  if (batch.length > 0) {
+    inserted += await processBatch(batch, {
+      db, productList, now,
+      synnexResp, dandhResp, ingramResp, suppliesResp, almoResp,
+      rawSynnex, rawDandh, rawIngram, rawSupplies,
+    });
+    processed += batch.length;
+  }
+
+  console.timeEnd("StreamingBuild");
+  console.log(`✅ Streaming build complete: ${processed} groups processed, ${inserted} products inserted`);
+
+  // Post-build steps (same as original)
+  console.log("fixMissingCategoriesFastv3...");
+  console.time("fixMissingCategoriesFastv3");
+  const { updated: fixed } = await fixMissingCategoriesFastv3();
+  console.timeEnd("fixMissingCategoriesFastv3");
+
+  console.log("updatePriority...");
+  const { updated: prio } = await updatePriority();
+
+  return { inserted, total: processed, customUp: 0, fixed, prio };
+}
+
+interface BatchContext {
+  db: any;
+  productList: any;
+  now: Date;
+  synnexResp: any;
+  dandhResp: any;
+  ingramResp: any;
+  suppliesResp: any;
+  almoResp: any;
+  rawSynnex: any;
+  rawDandh: any;
+  rawIngram: any;
+  rawSupplies: any;
+}
+
+async function processBatch(groups: any[], ctx: BatchContext): Promise<number> {
+  const skus = groups.map(g => g.normalized_sku_list?.[0]).filter(Boolean);
+  if (skus.length === 0) return 0;
+
+  // 1. Query all response tables for this batch of SKUs
+  const [synnexRows, dandhRows, ingramRows, suppliesRows, almoRows] = await Promise.all([
+    ctx.synnexResp.find({ normalized_sku: { $in: skus } }).toArray(),
+    ctx.dandhResp.find({ normalized_sku: { $in: skus } }).toArray(),
+    ctx.ingramResp.find({ normalized_sku: { $in: skus } }).toArray(),
+    ctx.suppliesResp.find({ normalized_sku: { $in: skus } }).toArray(),
+    ctx.almoResp.find({ normalized_sku: { $in: skus } }).toArray(),
+  ]);
+
+  // Build lookup maps for this batch
+  const synnexMap = indexBy(synnexRows, "normalized_sku");
+  const dandhMap = indexBy(dandhRows, "normalized_sku");
+  const ingramMap = indexBy(ingramRows, "normalized_sku");
+  const suppliesMap = indexBy(suppliesRows, "normalized_sku");
+  const almoMap = indexBy(almoRows, "normalized_sku");
+
+  // 2. Query raw collections for names and categories
+  const [synRaw, dnhRaw, ingRaw, supRaw] = await Promise.all([
+    ctx.rawSynnex.find({ normalized_sku: { $in: skus } }, { projection: { normalized_sku: 1, sku: 1, name: 1, category_class: 1, category_class_l2: 1, category_class_l3: 1 } }).toArray(),
+    ctx.rawDandh.find({ normalized_sku: { $in: skus } }, { projection: { normalized_sku: 1, sku: 1, name: 1, category_class: 1, category_class_l2: 1, category_class_l3: 1 } }).toArray(),
+    ctx.rawIngram.find({ normalized_sku: { $in: skus } }, { projection: { normalized_sku: 1, sku: 1, name: 1 } }).toArray(),
+    ctx.rawSupplies.find({ normalized_sku: { $in: skus } }, { projection: { normalized_sku: 1, sku: 1, name: 1 } }).toArray(),
+  ]);
+
+  // Name maps for this batch
+  const synNames: Record<string, string> = {};
+  const dNames: Record<string, string> = {};
+  const iNames: Record<string, string> = {};
+  const sNames: Record<string, string> = {};
+
+  // Category maps for this batch
+  const synCats: Record<string, any> = {};
+  const dnhCats: Record<string, any> = {};
+
+  for (const r of synRaw) {
+    const k = normalizeSku(r.normalized_sku ?? r.sku);
+    if (k) {
+      synNames[k] = cleanString(r.name);
+      synCats[k] = { c1: cleanString(r.category_class), c2: cleanString(r.category_class_l2), c3: cleanString(r.category_class_l3) };
+    }
+  }
+  for (const r of dnhRaw) {
+    const k = normalizeSku(r.normalized_sku ?? r.sku);
+    if (k) {
+      dNames[k] = cleanString(r.name);
+      dnhCats[k] = { c1: cleanString(r.category_class), c2: cleanString(r.category_class_l2), c3: cleanString(r.category_class_l3) };
+    }
+  }
+  for (const r of ingRaw) {
+    const k = normalizeSku(r.normalized_sku ?? r.sku);
+    if (k) iNames[k] = cleanString(r.name);
+  }
+  for (const r of supRaw) {
+    const k = normalizeSku(r.normalized_sku ?? r.sku);
+    if (k) sNames[k] = cleanString(r.name);
+  }
+
+  const maps: NameMaps = { syn: synNames, dnh: dNames, ing: iNames, sup: sNames };
+
+  // 3. Build product docs
+  const docs: any[] = [];
+
+  for (const group of groups) {
+    const normalized = group.normalized_sku_list?.[0];
+    if (!normalized) continue;
+
+    const rawSku = group.sku_list?.[0] ?? normalized;
+
+    // Merge response data
+    const synnex = synnexMap[normalized];
+    const dandh = dandhMap[normalized];
+    const ingram = ingramMap[normalized];
+    const supplies = suppliesMap[normalized];
+    const almo = almoMap[normalized];
+
+    const distributorList: string[] = [];
+
+    const doc: any = {
+      sku: cleanString(rawSku),
+      normalized_sku: normalized,
+      upc: cleanString(group.upc ?? null),
+      normalized_upc: cleanString(group.normalized_upc ?? group.upc ?? null),
+      manufacturer_map: cleanString(group.canonical_manufacturer ?? null),
+
+      synnex_response: null, synnex_price: null, synnex_quantity: null,
+      dandh_response: null, dandh_price: null, dandh_quantity: null,
+      almo_response: null, almo_price: null, almo_quantity: null,
+      ingram_response: null, ingram_price: null, ingram_quantity: null,
+      supplies_response: null, supplies_price: null, supplies_count: null,
+
+      distributor_list: distributorList,
+      category_class: null, category_class_l2: null, category_class_l3: null,
+      category_supplies: null, category_dandh: null, category_ingram: null,
+      condition: "new",
+      name: null, name_source: null,
+      uploaded_file_url: UPLOADED_FILE_PATH,
+      created_at: ctx.now, updated_at: ctx.now,
+    };
+
+    // Apply response data per distributor (same logic as original)
+    if (synnex) {
+      doc.synnex_response = Array.isArray(synnex.synnex_response) ? synnex.synnex_response : null;
+      doc.synnex_price = synnex.synnex_price ?? synnex.price ?? null;
+      doc.synnex_quantity = synnex.synnex_quantity ?? synnex.quantity ?? null;
+      distributorList.push("synnex");
+    }
+    if (dandh) {
+      doc.dandh_response = dandh.dandh_response ?? dandh.response ?? null;
+      doc.dandh_price = dandh.dandh_price ?? dandh.price ?? null;
+      doc.dandh_quantity = dandh.dandh_quantity ?? dandh.quantity ?? null;
+      distributorList.push("dandh");
+    }
+    if (ingram) {
+      doc.ingram_response = ingram.ingram_response ?? ingram.response ?? null;
+      doc.ingram_price = ingram.ingram_price ?? ingram.price ?? null;
+      doc.ingram_quantity = ingram.ingram_quantity ?? ingram.quantity ?? null;
+      distributorList.push("ingram");
+    }
+    if (supplies) {
+      doc.supplies_response = supplies.supplies_response ?? supplies.response ?? null;
+      doc.supplies_price = supplies.supplies_price ?? supplies.price ?? null;
+      doc.supplies_count = supplies.supplies_count ?? supplies.count ?? null;
+      distributorList.push("supplies");
+    }
+    if (almo) {
+      doc.almo_response = almo.almo_response ?? almo.response ?? null;
+      doc.almo_price = almo.almo_price ?? almo.price ?? null;
+      doc.almo_quantity = almo.almo_count ?? almo.quantity ?? null;
+      distributorList.push("almo");
+    }
+
+    // Categories from raw (Synnex priority, then D&H)
+    const key = normalizeSku(normalized);
+    if (synCats[key]) {
+      doc.category_class = synCats[key].c1;
+      doc.category_class_l2 = synCats[key].c2;
+      doc.category_class_l3 = synCats[key].c3;
+    } else if (dnhCats[key]) {
+      doc.category_class = dnhCats[key].c1;
+      doc.category_class_l2 = dnhCats[key].c2;
+      doc.category_class_l3 = dnhCats[key].c3;
+    }
+
+    // Name picking + condition detection
+    const nameForCond = synNames[key] || dNames[key] || iNames[key] || sNames[key];
+    doc.condition = detectCondition(nameForCond);
+    const { name, source } = pickNameForSku(key, distributorList, maps);
+    doc.name = name;
+    doc.name_source = source;
+
+    // Final field cleanup
+    doc.sku = cleanString(doc.sku);
+    doc.normalized_sku = normalizeSku(doc.sku);
+    doc.upc = cleanString(doc.upc);
+    doc.normalized_upc = cleanString(doc.normalized_upc);
+    doc.category_class = cleanString(doc.category_class);
+    doc.category_class_l2 = cleanString(doc.category_class_l2);
+    doc.category_class_l3 = cleanString(doc.category_class_l3);
+    doc.manufacturer_map = cleanString(doc.manufacturer_map);
+    doc.name = doc.name ? cleanString(doc.name) : null;
+    doc.name_source = doc.name_source ? cleanString(doc.name_source) : null;
+
+    docs.push(doc);
+  }
+
+  // 4. Write batch
+  if (docs.length > 0) {
+    await ctx.productList.insertMany(docs, { ordered: false }).catch(() => { });
+  }
+
+  return docs.length;
+}
+
+function indexBy(rows: any[], field: string): Record<string, any> {
+  const map: Record<string, any> = {};
+  for (const row of rows) {
+    const key = row[field];
+    if (key) map[key] = row;
+  }
+  return map;
+}
+
+/* =========================================================
    CUSTOM CATEGORY APPLY
 ========================================================= */
 
