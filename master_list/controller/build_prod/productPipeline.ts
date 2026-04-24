@@ -2,6 +2,7 @@ import axios from "axios";
 import { getDb } from "../../config/mongdodb.config";
 import { fixMissingCategoriesFast } from "../prod_category/missingcategoryUpdate";
 import { cleanString, normalizeSku } from "../../utils/normalize";
+import { cleanupDuplicates } from "./duplicateCleanup";
 
 const MIN_WAREHOUSE_QTY = 5;
 const MIN_TOTAL_WAREHOUSE_QTY = 20;
@@ -698,6 +699,282 @@ export async function buildProductList() {
   const { updated: prio } = await updatePriority();
   // console.timeEnd("updatePriority");
   return { inserted, total: allDocs.length, customUp, fixed, prio };
+}
+
+/* =========================================================
+   STREAMING BUILD (EBP-12)
+   Cursor-based alternative to buildProductList() that processes
+   products in batches with constant memory usage.
+
+   Uses $unionWith to merge all 5 response tables by normalized_sku
+   in MongoDB, then streams the result for enrichment in JS.
+========================================================= */
+
+const STREAMING_BATCH_SIZE = parseInt(process.env.BUILD_BATCH_SIZE || "1000", 10);
+
+export async function buildProductListStreaming() {
+  console.log("=================================================");
+  console.log(`BUILD PRODUCT LIST (STREAMING, batch=${STREAMING_BATCH_SIZE})`);
+  console.log("\n\n");
+
+  const db = await getDb("master_list");
+  await db.dropCollection("product_list").catch(() => { });
+  await db.createCollection("product_list");
+
+  const productList = db.collection("product_list");
+  await productList.createIndex({ normalized_sku: 1 }, { unique: true });
+  await productList.createIndex({ sku: 1 });
+
+  // Ensure indexes on raw collections for enrichment lookups
+  await db.collection("dist_synnex_raw").createIndex({ normalized_sku: 1 });
+  await db.collection("dist_dandh_raw").createIndex({ sku: 1 });
+  await db.collection("dist_ingram_raw").createIndex({ sku: 1 });
+  await db.collection("dist_supplies_raw").createIndex({ sku: 1 });
+
+  const now = new Date();
+  let inserted = 0;
+  let processed = 0;
+
+  // MongoDB aggregation: union all 5 response tables, group by normalized_sku
+  // This produces one doc per SKU with each distributor's data collected
+  console.time("StreamingBuild");
+
+  const mergedCursor = db.collection("synnex_response_table").aggregate([
+    // Start with Synnex, tag each doc with its distributor
+    { $addFields: { _dist: "synnex" } },
+
+    // Union in the other 4 response tables
+    { $unionWith: { coll: "dandh_response_table", pipeline: [{ $addFields: { _dist: "dandh" } }] } },
+    { $unionWith: { coll: "ingram_response_table", pipeline: [{ $addFields: { _dist: "ingram" } }] } },
+    { $unionWith: { coll: "supplies_response_table", pipeline: [{ $addFields: { _dist: "supplies" } }] } },
+    { $unionWith: { coll: "almo_response_table", pipeline: [{ $addFields: { _dist: "almo" } }] } },
+
+    // Filter out docs without a normalized_sku
+    { $match: { normalized_sku: { $ne: null } } },
+
+    // Group by normalized_sku — collect all response docs per SKU
+    {
+      $group: {
+        _id: "$normalized_sku",
+        responses: { $push: "$$ROOT" },
+      }
+    },
+  ], { allowDiskUse: true });
+
+  let batch: any[] = [];
+
+  while (await mergedCursor.hasNext()) {
+    const group: any = await mergedCursor.next();
+    batch.push(group);
+
+    if (batch.length >= STREAMING_BATCH_SIZE) {
+      inserted += await enrichAndInsertBatch(batch, db, productList, now);
+      processed += batch.length;
+      if (processed % 5000 === 0) console.log(`  ... processed ${processed} SKUs, inserted ${inserted}`);
+      batch = [];
+    }
+  }
+
+  if (batch.length > 0) {
+    inserted += await enrichAndInsertBatch(batch, db, productList, now);
+    processed += batch.length;
+  }
+
+  console.timeEnd("StreamingBuild");
+  console.log(`✅ Streaming build complete: ${processed} SKUs processed, ${inserted} products inserted`);
+
+  // Duplicate cleanup — only UPC conflicts needed (SKU dedup handled by unique index)
+  const { removed } = await cleanupDuplicates();
+  inserted -= removed;
+
+  // Post-build steps (same as original)
+  console.log("fixMissingCategoriesFastv3...");
+  console.time("fixMissingCategoriesFastv3");
+  const { updated: fixed } = await fixMissingCategoriesFastv3();
+  console.timeEnd("fixMissingCategoriesFastv3");
+
+  console.log("updatePriority...");
+  const { updated: prio } = await updatePriority();
+
+  return { inserted, total: processed, customUp: 0, fixed, prio };
+}
+
+async function enrichAndInsertBatch(
+  groups: { _id: string; responses: any[] }[],
+  db: any,
+  productList: any,
+  now: Date
+): Promise<number> {
+  // Collect SKUs and raw SKUs for this batch
+  const skus = groups.map(g => g._id).filter(Boolean);
+  const rawSkuSet = new Set<string>();
+  for (const g of groups) {
+    for (const r of g.responses) {
+      const s = cleanString(r.sku ?? r.raw_sku ?? "");
+      if (s) rawSkuSet.add(s);
+    }
+  }
+  const rawSkus = [...rawSkuSet];
+
+  // Query raw collections for names and categories
+  const [synRaw, dnhRaw, ingRaw, supRaw] = await Promise.all([
+    db.collection("dist_synnex_raw").find({ normalized_sku: { $in: skus } }, { projection: { normalized_sku: 1, sku: 1, name: 1, category_class: 1, category_class_l2: 1, category_class_l3: 1 } }).toArray(),
+    db.collection("dist_dandh_raw").find({ sku: { $in: rawSkus } }, { projection: { sku: 1, name: 1, category_class: 1, category_class_l2: 1, category_class_l3: 1 } }).toArray(),
+    db.collection("dist_ingram_raw").find({ sku: { $in: rawSkus } }, { projection: { sku: 1, name: 1 } }).toArray(),
+    db.collection("dist_supplies_raw").find({ sku: { $in: rawSkus } }, { projection: { sku: 1, name: 1 } }).toArray(),
+  ]);
+
+  // Build name and category maps for this batch
+  const synNames: Record<string, string> = {};
+  const dNames: Record<string, string> = {};
+  const iNames: Record<string, string> = {};
+  const sNames: Record<string, string> = {};
+  const synCats: Record<string, any> = {};
+  const dnhCats: Record<string, any> = {};
+
+  for (const r of synRaw) {
+    const k = normalizeSku(r.normalized_sku ?? r.sku);
+    if (k) {
+      synNames[k] = cleanString(r.name);
+      synCats[k] = { c1: cleanString(r.category_class), c2: cleanString(r.category_class_l2), c3: cleanString(r.category_class_l3) };
+    }
+  }
+  for (const r of dnhRaw) {
+    const k = normalizeSku(r.sku);
+    if (k) {
+      dNames[k] = cleanString(r.name);
+      dnhCats[k] = { c1: cleanString(r.category_class), c2: cleanString(r.category_class_l2), c3: cleanString(r.category_class_l3) };
+    }
+  }
+  for (const r of ingRaw) {
+    const k = normalizeSku(r.sku);
+    if (k) iNames[k] = cleanString(r.name);
+  }
+  for (const r of supRaw) {
+    const k = normalizeSku(r.sku);
+    if (k) sNames[k] = cleanString(r.name);
+  }
+
+  const maps: NameMaps = { syn: synNames, dnh: dNames, ing: iNames, sup: sNames };
+
+  // Build product docs
+  const docs: any[] = [];
+
+  for (const group of groups) {
+    const normalized = group._id;
+    if (!normalized) continue;
+
+    // Separate responses by distributor
+    const byDist: Record<string, any> = {};
+    for (const r of group.responses) {
+      if (r._dist && !byDist[r._dist]) byDist[r._dist] = r;
+    }
+
+    const synnex = byDist["synnex"];
+    const dandh = byDist["dandh"];
+    const ingram = byDist["ingram"];
+    const supplies = byDist["supplies"];
+    const almo = byDist["almo"];
+
+    // Get base fields from first response (Synnex priority, matching original)
+    const firstResponse = synnex ?? dandh ?? ingram ?? supplies ?? almo;
+    const rawSku = cleanString(firstResponse?.sku ?? firstResponse?.raw_sku ?? normalized);
+
+    const distributorList: string[] = [];
+
+    const doc: any = {
+      sku: rawSku,
+      normalized_sku: normalized,
+      upc: cleanString(firstResponse?.upc ?? null),
+      normalized_upc: cleanString(firstResponse?.normalized_upc ?? null),
+      manufacturer_map: cleanString(firstResponse?.manufacturer_map ?? null),
+
+      synnex_response: null, synnex_price: null, synnex_quantity: null,
+      dandh_response: null, dandh_price: null, dandh_quantity: null,
+      almo_response: null, almo_price: null, almo_quantity: null,
+      ingram_response: null, ingram_price: null, ingram_quantity: null,
+      supplies_response: null, supplies_price: null, supplies_count: null,
+
+      distributor_list: distributorList,
+      category_class: null, category_class_l2: null, category_class_l3: null,
+      category_supplies: null, category_dandh: null, category_ingram: null,
+      condition: "new",
+      name: null, name_source: null,
+      uploaded_file_url: UPLOADED_FILE_PATH,
+      created_at: now, updated_at: now,
+    };
+
+    // Apply response data per distributor (same logic as original)
+    if (synnex) {
+      doc.synnex_response = Array.isArray(synnex.synnex_response) ? synnex.synnex_response : null;
+      doc.synnex_price = synnex.synnex_price ?? synnex.price ?? null;
+      doc.synnex_quantity = synnex.synnex_quantity ?? synnex.quantity ?? null;
+      distributorList.push("synnex");
+    }
+    if (dandh) {
+      doc.dandh_response = dandh.dandh_response ?? dandh.response ?? null;
+      doc.dandh_price = dandh.dandh_price ?? dandh.price ?? null;
+      doc.dandh_quantity = dandh.dandh_quantity ?? dandh.quantity ?? null;
+      distributorList.push("dandh");
+    }
+    if (ingram) {
+      doc.ingram_response = ingram.ingram_response ?? ingram.response ?? null;
+      doc.ingram_price = ingram.ingram_price ?? ingram.price ?? null;
+      doc.ingram_quantity = ingram.ingram_quantity ?? ingram.quantity ?? null;
+      distributorList.push("ingram");
+    }
+    if (supplies) {
+      doc.supplies_response = supplies.supplies_response ?? supplies.response ?? null;
+      doc.supplies_price = supplies.supplies_price ?? supplies.price ?? null;
+      doc.supplies_count = supplies.supplies_count ?? supplies.count ?? null;
+      distributorList.push("supplies");
+    }
+    if (almo) {
+      doc.almo_response = almo.almo_response ?? almo.response ?? null;
+      doc.almo_price = almo.almo_price ?? almo.price ?? null;
+      doc.almo_quantity = almo.almo_count ?? almo.quantity ?? null;
+      distributorList.push("almo");
+    }
+
+    // Categories from raw (Synnex priority, then D&H)
+    const key = normalizeSku(normalized);
+    if (synCats[key]) {
+      doc.category_class = synCats[key].c1;
+      doc.category_class_l2 = synCats[key].c2;
+      doc.category_class_l3 = synCats[key].c3;
+    } else if (dnhCats[key]) {
+      doc.category_class = dnhCats[key].c1;
+      doc.category_class_l2 = dnhCats[key].c2;
+      doc.category_class_l3 = dnhCats[key].c3;
+    }
+
+    // Name picking + condition detection
+    const nameForCond = synNames[key] || dNames[key] || iNames[key] || sNames[key];
+    doc.condition = detectCondition(nameForCond);
+    const { name, source } = pickNameForSku(key, distributorList, maps);
+    doc.name = name;
+    doc.name_source = source;
+
+    // Final field cleanup
+    doc.sku = cleanString(doc.sku);
+    doc.normalized_sku = normalizeSku(doc.sku);
+    doc.upc = cleanString(doc.upc);
+    doc.normalized_upc = cleanString(doc.normalized_upc);
+    doc.category_class = cleanString(doc.category_class);
+    doc.category_class_l2 = cleanString(doc.category_class_l2);
+    doc.category_class_l3 = cleanString(doc.category_class_l3);
+    doc.manufacturer_map = cleanString(doc.manufacturer_map);
+    doc.name = doc.name ? cleanString(doc.name) : null;
+    doc.name_source = doc.name_source ? cleanString(doc.name_source) : null;
+
+    docs.push(doc);
+  }
+
+  if (docs.length > 0) {
+    await productList.insertMany(docs, { ordered: false }).catch(() => { });
+  }
+
+  return docs.length;
 }
 
 /* =========================================================
