@@ -18,8 +18,13 @@ export async function connectMongoBase(): Promise<Connection> {
 
 // ✅ No "mongodb" import here
 export async function getDb(dbName: string) {
+  // Allow overriding master_list → master_list_test for testing
+  const resolvedName = (dbName === "master_list" && process.env.DB_NAME_OVERRIDE)
+    ? process.env.DB_NAME_OVERRIDE
+    : dbName;
+
   const baseConn = await connectMongoBase();
-  const conn = baseConn.useDb(dbName, { useCache: true });
+  const conn = baseConn.useDb(resolvedName, { useCache: true });
 
   if (!conn.db) throw new Error("Mongo DB not ready");
   return conn.db; // inferred type from mongoose's mongodb

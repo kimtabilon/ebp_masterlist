@@ -908,12 +908,18 @@ async function processBatch(groups: any[], ctx: BatchContext): Promise<number> {
 
     const distributorList: string[] = [];
 
+    // Get UPC from first available response table (same priority as original build:
+    // Synnex → D&H → Ingram → Supplies → Almo → fall back to grouped_upc_data)
+    const firstResponse = synnex ?? dandh ?? ingram ?? supplies ?? almo;
+    const responseUpc = cleanString(firstResponse?.upc ?? group.upc ?? null);
+    const responseNormalizedUpc = cleanString(firstResponse?.normalized_upc ?? group.normalized_upc ?? group.upc ?? null);
+
     const doc: any = {
       sku: cleanString(rawSku),
       normalized_sku: normalized,
-      upc: cleanString(group.upc ?? null),
-      normalized_upc: cleanString(group.normalized_upc ?? group.upc ?? null),
-      manufacturer_map: cleanString(group.canonical_manufacturer ?? null),
+      upc: responseUpc,
+      normalized_upc: responseNormalizedUpc,
+      manufacturer_map: cleanString(firstResponse?.manufacturer_map ?? group.canonical_manufacturer ?? null),
 
       synnex_response: null, synnex_price: null, synnex_quantity: null,
       dandh_response: null, dandh_price: null, dandh_quantity: null,

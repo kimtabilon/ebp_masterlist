@@ -4,10 +4,10 @@ import { getDb } from "../../config/mongdodb.config";
  * Remove duplicate/conflicting products from the product_list collection
  * using MongoDB aggregation instead of in-memory maps.
  *
- * Rules (same as original in-memory cleanup):
- * 1. Remove products with null/empty UPC (after stripping non-digits)
- * 2. Remove SKUs that map to multiple UPCs
- * 3. Remove UPCs that map to multiple SKUs
+ * Rules (matching original in-memory cleanup behavior):
+ * 1. Remove products with null/empty UPC
+ * 2. SKUs with multiple UPCs — keep the first inserted doc, remove the rest
+ * 3. UPCs with multiple SKUs — keep the first inserted doc, remove the rest
  */
 export async function cleanupDuplicates(): Promise<{ removed: number }> {
     const db = await getDb("master_list");
@@ -29,42 +29,71 @@ export async function cleanupDuplicates(): Promise<{ removed: number }> {
     totalRemoved += nullRemoved;
     console.log(`  Removed ${nullRemoved} products with null/empty UPC`);
 
-    // 2. Find SKUs that map to multiple UPCs and remove them
+    // 2. SKUs with multiple UPCs — keep first (lowest _id), remove duplicates
     const skuConflicts = await productList.aggregate([
         { $match: { upc: { $nin: [null, ""] } } },
-        { $group: { _id: "$normalized_sku", upcs: { $addToSet: "$upc" } } },
+        {
+            $group: {
+                _id: "$normalized_sku",
+                upcs: { $addToSet: "$upc" },
+                keepId: { $first: "$_id" },   // keep the first doc (by insert order)
+                allIds: { $push: "$_id" },
+            }
+        },
         { $match: { $expr: { $gt: [{ $size: "$upcs" }, 1] } } },
-        { $project: { _id: 1 } }
     ]).toArray();
 
     if (skuConflicts.length > 0) {
-        const conflictSkus = skuConflicts.map(c => c._id);
-        const skuResult = await productList.deleteMany({
-            normalized_sku: { $in: conflictSkus }
-        });
-        const skuRemoved = skuResult.deletedCount ?? 0;
-        totalRemoved += skuRemoved;
-        console.log(`  Removed ${skuRemoved} products from ${conflictSkus.length} SKUs with multiple UPCs`);
+        // Collect all IDs to remove (everything except the keepId)
+        const removeIds: any[] = [];
+        for (const conflict of skuConflicts) {
+            for (const id of conflict.allIds) {
+                if (id.toString() !== conflict.keepId.toString()) {
+                    removeIds.push(id);
+                }
+            }
+        }
+
+        if (removeIds.length > 0) {
+            const skuResult = await productList.deleteMany({ _id: { $in: removeIds } });
+            const skuRemoved = skuResult.deletedCount ?? 0;
+            totalRemoved += skuRemoved;
+            console.log(`  Removed ${skuRemoved} duplicates from ${skuConflicts.length} SKUs with multiple UPCs (kept 1 each)`);
+        }
     } else {
         console.log(`  No SKUs with multiple UPCs found`);
     }
 
-    // 3. Find UPCs that map to multiple SKUs and remove them
+    // 3. UPCs with multiple SKUs — keep first (lowest _id), remove duplicates
     const upcConflicts = await productList.aggregate([
         { $match: { upc: { $nin: [null, ""] } } },
-        { $group: { _id: "$upc", skus: { $addToSet: "$normalized_sku" } } },
+        {
+            $group: {
+                _id: "$upc",
+                skus: { $addToSet: "$normalized_sku" },
+                keepId: { $first: "$_id" },
+                allIds: { $push: "$_id" },
+            }
+        },
         { $match: { $expr: { $gt: [{ $size: "$skus" }, 1] } } },
-        { $project: { _id: 1 } }
     ]).toArray();
 
     if (upcConflicts.length > 0) {
-        const conflictUpcs = upcConflicts.map(c => c._id);
-        const upcResult = await productList.deleteMany({
-            upc: { $in: conflictUpcs }
-        });
-        const upcRemoved = upcResult.deletedCount ?? 0;
-        totalRemoved += upcRemoved;
-        console.log(`  Removed ${upcRemoved} products from ${conflictUpcs.length} UPCs with multiple SKUs`);
+        const removeIds: any[] = [];
+        for (const conflict of upcConflicts) {
+            for (const id of conflict.allIds) {
+                if (id.toString() !== conflict.keepId.toString()) {
+                    removeIds.push(id);
+                }
+            }
+        }
+
+        if (removeIds.length > 0) {
+            const upcResult = await productList.deleteMany({ _id: { $in: removeIds } });
+            const upcRemoved = upcResult.deletedCount ?? 0;
+            totalRemoved += upcRemoved;
+            console.log(`  Removed ${upcRemoved} duplicates from ${upcConflicts.length} UPCs with multiple SKUs (kept 1 each)`);
+        }
     } else {
         console.log(`  No UPCs with multiple SKUs found`);
     }
