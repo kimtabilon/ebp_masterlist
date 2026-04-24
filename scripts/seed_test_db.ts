@@ -6,20 +6,18 @@
  * - WRITES to master_list_test (new database) — creates collections and inserts docs
  *
  * Strategy:
- * - Picks 200 groups from grouped_upc_data as the "seed set"
+ * - Picks seed groups from grouped_upc_data as the "seed set"
  * - Seeds related data from response tables and raw collections that match those SKUs
  * - This ensures the test data is internally consistent (a product in grouped_upc_data
  *   will have matching entries in response tables and raw collections)
  *
- * Usage: node scripts/seed_test_db.cjs
- *
- * Requires MONGO_URI env var or uses the hardcoded default.
+ * Usage: npx tsx scripts/seed_test_db.ts
  */
 
-const { MongoClient } = require(require("path").join(process.cwd(), "node_modules/mongodb"));
+process.env.mUser = "tempUserMasterlist";
+process.env.pUser = "F4@zN!8qW2#Lp9$Xr6^tY3&m";
 
-const uri = process.env.MONGO_URI || "mongodb://tempUserMasterlist:F4%40zN%218qW2%23Lp9%24Xr6%5EtY3%26m@64.225.124.70:27018/?authSource=admin&directConnection=true&serverSelectionTimeoutMS=5000";
-const client = new MongoClient(uri);
+import { getDb } from "../master_list/config/mongdodb.config.js";
 
 const SOURCE_DB = "master_list";
 const TEST_DB = "master_list_test";
@@ -27,23 +25,21 @@ const SEED_GROUP_COUNT = 10000;
 
 async function run() {
     try {
-        await client.connect();
-        const source = client.db(SOURCE_DB);
-        const test = client.db(TEST_DB);
+        const source = await getDb(SOURCE_DB);
+        const test = await getDb(TEST_DB);
 
         console.log("========================================");
         console.log(`  SEEDING ${TEST_DB} FROM ${SOURCE_DB}`);
         console.log("========================================\n");
 
         // Step 1: Pick seed groups from grouped_upc_data
-        // These define our test universe — everything else is seeded relative to them
         const seedGroups = await source.collection("grouped_upc_data")
             .find({})
             .limit(SEED_GROUP_COUNT)
             .toArray();
 
-        const normalizedSkus = new Set();
-        const rawSkus = new Set();
+        const normalizedSkus = new Set<string>();
+        const rawSkus = new Set<string>();
         for (const g of seedGroups) {
             for (const s of (g.normalized_sku_list || [])) normalizedSkus.add(s);
             for (const s of (g.sku_list || [])) rawSkus.add(s);
@@ -54,7 +50,6 @@ async function run() {
         console.log(`Seed set: ${normalizedArr.length} normalized SKUs, ${rawArr.length} raw SKUs\n`);
 
         // Step 2: Define what to seed
-        // Each entry: { name, query function that returns docs to copy }
         const collections = [
             {
                 name: "grouped_upc_data",
@@ -67,7 +62,7 @@ async function run() {
                     .limit(5000)
                     .toArray(),
             },
-            // Response tables — query by normalized_sku (no limit — take all matches)
+            // Response tables — query by normalized_sku
             ...["synnex_response_table", "dandh_response_table", "ingram_response_table",
                 "supplies_response_table", "almo_response_table"].map(name => ({
                 name,
@@ -75,7 +70,7 @@ async function run() {
                     .find({ normalized_sku: { $in: normalizedArr } })
                     .toArray(),
             })),
-            // Raw distributor collections — Synnex has normalized_sku, others use sku (no limit)
+            // Raw distributor collections — Synnex has normalized_sku, others use sku
             {
                 name: "dist_synnex_raw",
                 getDocs: async () => source.collection("dist_synnex_raw")
@@ -105,15 +100,14 @@ async function run() {
             const docs = await col.getDocs();
 
             if (docs.length > 0) {
-                // Remove _id so MongoDB generates new ones (avoids conflicts)
-                const cleanDocs = docs.map(({ _id, ...rest }) => rest);
+                const cleanDocs = docs.map(({ _id, ...rest }: any) => rest);
                 await test.collection(col.name).insertMany(cleanDocs);
             }
 
             console.log(`  ${col.name}: ${docs.length} docs`);
         }
 
-        // Step 4: Create indexes the pipeline expects
+        // Step 4: Create indexes
         console.log("\n--- Creating indexes ---");
 
         await test.collection("dist_synnex_raw").createIndex({ normalized_sku: 1 });
@@ -134,7 +128,7 @@ async function run() {
         console.log("\n--- Verification ---");
         const testCollections = await test.listCollections().toArray();
         let totalDocs = 0;
-        for (const col of testCollections.sort((a, b) => a.name.localeCompare(b.name))) {
+        for (const col of testCollections.sort((a: any, b: any) => a.name.localeCompare(b.name))) {
             const count = await test.collection(col.name).countDocuments();
             totalDocs += count;
             console.log(`  ${col.name}: ${count} docs`);
@@ -145,11 +139,11 @@ async function run() {
         console.log(`  ✅ ${TEST_DB} READY`);
         console.log("========================================");
 
-    } catch (err) {
+    } catch (err: any) {
         console.error("❌ Error:", err.message);
-    } finally {
-        await client.close();
     }
+
+    process.exit(0);
 }
 
 run();
