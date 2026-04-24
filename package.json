@@ -10,7 +10,10 @@
     "net_suite": "tsx netsuite/server.ts",
     "process_order": "tsx order_process/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "npx tsx --test tests/unit.test.ts",
+    "test:integration": "npx tsx tests/integration.test.ts",
+    "test:e2e": "npx tsx tests/e2e.test.ts"
   },
   "keywords": [],
   "author": "",
