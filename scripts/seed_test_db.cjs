@@ -23,7 +23,7 @@ const client = new MongoClient(uri);
 
 const SOURCE_DB = "master_list";
 const TEST_DB = "master_list_test";
-const SEED_GROUP_COUNT = 2000;
+const SEED_GROUP_COUNT = 10000;
 
 async function run() {
     try {
