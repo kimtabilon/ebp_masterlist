@@ -21,7 +21,7 @@ import { getDb } from "../master_list/config/mongdodb.config.js";
 
 const SOURCE_DB = "master_list";
 const TEST_DB = "master_list_test";
-const SEED_GROUP_COUNT = 10000;
+const SEED_GROUP_COUNT = parseInt(process.env.SEED_COUNT || "10000", 10);
 
 async function run() {
     try {

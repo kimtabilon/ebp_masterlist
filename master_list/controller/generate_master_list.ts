@@ -244,14 +244,17 @@ async function measure<T>(name: string, fn: () => Promise<T>, runLog?: PipelineR
   const durationSec = parseFloat(((endTime - startTime) / 1000).toFixed(2));
   const heapDeltaMb = parseFloat(((endHeap - startHeap) / 1024 / 1024).toFixed(2));
 
-  const db: any = await getDb("ebp_marketplace");
-  const collection = db.collection("logs");
+  // Skip external log writes during tests (DB_NAME_OVERRIDE indicates test mode)
+  if (!process.env.DB_NAME_OVERRIDE) {
+    const logDb: any = await getDb("ebp_marketplace");
+    const collection = logDb.collection("logs");
 
-  collection.insertOne({
-    from: 'masterlist',
-    info: `✅ DONE: ${name} | ⏱ ${durationSec}s | Heap Δ ${heapDeltaMb} MB`,
-    createdAt: new Date()
-  });
+    collection.insertOne({
+      from: 'masterlist',
+      info: `✅ DONE: ${name} | ⏱ ${durationSec}s | Heap Δ ${heapDeltaMb} MB`,
+      createdAt: new Date()
+    });
+  }
 
   console.log(
     `✅ DONE: ${name} | ⏱ ${durationSec}s | Heap Δ ${heapDeltaMb} MB`
