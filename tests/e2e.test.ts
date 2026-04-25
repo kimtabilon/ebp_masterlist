@@ -28,6 +28,7 @@ import { validateProductList, promoteProductList, rollbackProductList } from "..
 import { diffProductList } from "../master_list/controller/validation/diffProductList.js";
 import { PipelineRunCollector } from "../master_list/controller/validation/pipelineRunLog.js";
 import { sendPipelineAlert } from "../master_list/controller/validation/alerting.js";
+import { processBundlesMongo } from "../master_list/controller/sku_packed.js";
 
 describe("End-to-end: full orchestrator flow", () => {
   let db: any;
@@ -58,6 +59,10 @@ describe("End-to-end: full orchestrator flow", () => {
     const buildResult = await buildProductListStreaming();
     runLog.addStage({ name: "buildProductList", durationSec: 0, heapDeltaMb: 0 });
     assert.ok(buildResult.inserted > 0, `Build should insert products (got ${buildResult.inserted})`);
+
+    // Step 2b: Bundle processing (same as orchestrator)
+    await processBundlesMongo();
+    runLog.addStage({ name: "processBundlesMongo", durationSec: 0, heapDeltaMb: 0 });
 
     const productCount = await db.collection("product_list").countDocuments();
     assert.ok(productCount > 0, `product_list should have docs (got ${productCount})`);
