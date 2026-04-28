@@ -100,7 +100,10 @@ async function buildIngramBuffer() {
         count++;
     }
 
-    out.end();
+    await new Promise<void>((resolve, reject) => {
+        out.end(() => resolve());
+        out.on("error", reject);
+    });
     console.log(`📁 Buffer written: ${bufferFile}`);
     console.log(`📊 Total rows parsed: ${count}`);
 
@@ -258,6 +261,9 @@ export async function runIngram() {
     const inserted = await fastInsertAll();
     const removed = await removeDuplicates();
     await rebuildIndex();
+
+    // Clean up buffer file after successful ingestion
+    if (fs.existsSync(bufferFile)) fs.unlinkSync(bufferFile);
 
     console.log("=================================================");
     console.log("✅ INGRAM IMPORT COMPLETED");

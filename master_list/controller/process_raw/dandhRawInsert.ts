@@ -133,7 +133,10 @@ async function buildDandHBuffer(categoryMap: any) {
         count++;
     }
 
-    out.end();
+    await new Promise<void>((resolve, reject) => {
+        out.end(() => resolve());
+        out.on("error", reject);
+    });
 
     console.log(`📁 Buffer created: ${bufferFile}`);
     console.log(`📊 Parsed: ${count} rows`);
@@ -258,6 +261,9 @@ export async function runDandH() {
     await buildDandHUniqueIndex();
 
     const inserted = await insertDandHBuffer();
+
+    // Clean up buffer file after successful ingestion
+    if (fs.existsSync(bufferFile)) fs.unlinkSync(bufferFile);
 
     console.log("=================================================");
     console.log("✅ D&H IMPORT COMPLETE");

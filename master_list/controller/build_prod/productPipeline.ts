@@ -1,19 +1,10 @@
 import axios from "axios";
 import { getDb } from "../../config/mongdodb.config";
 import { fixMissingCategoriesFast } from "../prod_category/missingcategoryUpdate";
+import { cleanString, normalizeSku } from "../../utils/normalize";
 
 const MIN_WAREHOUSE_QTY = 5;
 const MIN_TOTAL_WAREHOUSE_QTY = 20;
-
-function cleanString(val: any): string {
-  if (val === null || val === undefined) return "";
-  return String(val).replace(/["']/g, "").replace(/\s+/g, " ").trim();
-}
-
-function normalizeSku(sku: any): string {
-  const cleaned = cleanString(sku);
-  return cleaned.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-}
 
 function detectCondition(name: any): "refurbished" | "new" {
   const s = cleanString(name).toLowerCase();
@@ -578,6 +569,12 @@ export async function buildProductList() {
   }
   console.timeEnd("namemaps");
 
+  // Release name maps — no longer needed after this point
+  for (const k in synNames) delete synNames[k];
+  for (const k in dNames) delete dNames[k];
+  for (const k in iNames) delete iNames[k];
+  for (const k in sNames) delete sNames[k];
+
   console.log("UPC / SKU duplicate cleanup...");
   console.time("duplicatecleanup");
   // UPC / SKU duplicate cleanup (keep your existing logic)
@@ -609,6 +606,9 @@ export async function buildProductList() {
   for (const key of remove) delete merged[key];
 
   const allDocs = Object.values(merged);
+
+  // Release merged object — allDocs holds the references now
+  for (const k in merged) delete merged[k];
 
   const BATCH_INSERT = 10000;
   let inserted = 0;

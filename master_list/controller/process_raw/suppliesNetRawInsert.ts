@@ -244,6 +244,9 @@ export async function runSupplies() {
 
     await buildSuppliesIndex();
 
+    // Clean up buffer file after successful ingestion
+    if (fs.existsSync(bufferFile)) fs.unlinkSync(bufferFile);
+
     console.log("=================================================");
     console.log("✅ SUPPLIES IMPORT COMPLETED");
     console.log("Parsed:", parsed);

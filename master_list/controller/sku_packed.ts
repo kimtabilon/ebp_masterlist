@@ -1,5 +1,6 @@
 import { getDb } from "../config/mongdodb.config";
 import { primeInventory } from "../utils/prime_inventory";
+import { normalizeSku } from "../utils/normalize";
 
 
 /* =========================================
@@ -69,8 +70,8 @@ function toNum(v: any) {
 
 /** read qty with support for BOTH schemas: *_quantity OR *_count */
 function getQty(doc: any, d: Dist): number {
-    const q1 = toNum(doc?.[`${d}_quantity`]);
-    if (q1) return q1;
+    const raw = doc?.[`${d}_quantity`];
+    if (raw != null) return toNum(raw);
     return toNum(doc?.[`${d}_count`]);
 }
 
@@ -124,11 +125,7 @@ async function bundleHasStocking_4pk(bundleSku: string) {
     return hasStockingInventory(inv);
 }
 
-/** 2PK: remove ALL non-alphanumerics */
-// function normalizeSkuForStocking(sku: string): string {
-function normalizeSku(sku: string): string {
-    return String(sku).replace(/[^a-zA-Z0-9]/g, "").trim();
-}
+/** normalizeSku imported from utils/normalize */
 
 async function bundleHasStocking_2pk(baseSku: string) {
     const skuNormalized = normalizeSku(baseSku);

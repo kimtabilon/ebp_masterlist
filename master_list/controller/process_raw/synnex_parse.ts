@@ -176,7 +176,10 @@ async function buildBuffer(categoryMap: any) {
         count++;
     }
 
-    out.end();
+    await new Promise<void>((resolve, reject) => {
+        out.end(() => resolve());
+        out.on("error", reject);
+    });
     console.log(`📁 Buffer written: ${bufferFile} — ${count} rows`);
     return count;
 }
@@ -432,6 +435,9 @@ export async function runSynnex() {
     const duplicates = await removeDuplicates();
 
     await rebuildIndex();
+
+    // Clean up buffer file after successful ingestion
+    if (fs.existsSync(bufferFile)) fs.unlinkSync(bufferFile);
 
     console.log("=================================================");
     console.log("✔ SYNNEX IMPORT DONE");
