@@ -13,6 +13,8 @@ export interface PipelineRunRecord {
     completedAt: Date;
     durationSec: number;
     status: "success" | "failed" | "rolled_back";
+    resumed: boolean;
+    resumedFromStage: string | null;
     stages: StageMetric[];
     validation: ValidationResult | null;
     diff: DiffResult | null;
@@ -25,9 +27,13 @@ export interface PipelineRunRecord {
 export class PipelineRunCollector {
     private startedAt: Date;
     private stages: StageMetric[] = [];
+    private _resumed: boolean = false;
+    private _resumedFromStage: string | null = null;
 
-    constructor() {
+    constructor(options?: { resumed?: boolean; resumedFromStage?: string }) {
         this.startedAt = new Date();
+        this._resumed = options?.resumed ?? false;
+        this._resumedFromStage = options?.resumedFromStage ?? null;
     }
 
     addStage(metric: StageMetric) {
@@ -48,6 +54,8 @@ export class PipelineRunCollector {
             completedAt,
             durationSec,
             status: options.status,
+            resumed: this._resumed,
+            resumedFromStage: this._resumedFromStage,
             stages: this.stages,
             validation: options.validation ?? null,
             diff: options.diff ?? null,

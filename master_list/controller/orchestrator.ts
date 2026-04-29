@@ -254,30 +254,57 @@ function defineStages(): PipelineStage[] {
 // ============================================================
 
 export interface OrchestratorOptions {
-    startFromStage?: string; // stage name to resume from (EBP-18 prep)
+    startFromStage?: string; // stage name to resume from
 }
 
 export async function runPipeline(options?: OrchestratorOptions): Promise<void> {
     const stages = defineStages();
-    const runLog = new PipelineRunCollector();
     const startFromStage = options?.startFromStage;
+    const isResumed = !!startFromStage;
+    const runLog = new PipelineRunCollector({
+        resumed: isResumed,
+        resumedFromStage: startFromStage,
+    });
 
     console.log("=================================================");
-    console.log("  PIPELINE ORCHESTRATOR");
+    console.log(`  PIPELINE ORCHESTRATOR${isResumed ? " (RESUMED)" : ""}`);
     console.log(`  Stages: ${stages.map(s => s.name).join(" → ")}`);
-    if (startFromStage) console.log(`  Resuming from: ${startFromStage}`);
+    if (isResumed) console.log(`  Resuming from: ${startFromStage}`);
     console.log(`  Started: ${new Date().toISOString()}`);
     console.log("=================================================\n");
 
-    let skipping = !!startFromStage;
+    // Validate startFromStage exists
+    if (startFromStage && !stages.find(s => s.name === startFromStage)) {
+        const error = `Unknown stage "${startFromStage}". Valid stages: ${stages.map(s => s.name).join(", ")}`;
+        await runLog.persist({ status: "failed", error });
+        throw new Error(error);
+    }
+
+    let skipping = isResumed;
     let lastResult: any = null;
 
     for (const stage of stages) {
         // Skip stages until we reach the resume point
         if (skipping) {
             if (stage.name === startFromStage) {
+                // Before resuming, validate that prior stages' outputs exist
+                console.log("🔍 Validating prior stages before resume...");
+                const priorStages = stages.slice(0, stages.indexOf(stage));
+                for (const prior of priorStages) {
+                    if (prior.validate) {
+                        const check = await prior.validate();
+                        console.log(`  ${prior.name}: ${check.detail}`);
+                        if (!check.ok && prior.critical) {
+                            const error = `Cannot resume from "${startFromStage}" — prior stage "${prior.name}" output is invalid: ${check.detail}`;
+                            await runLog.persist({ status: "failed", error });
+                            throw new Error(error);
+                        }
+                    }
+                }
+                console.log("✅ Prior stages validated\n");
+
                 skipping = false;
-                console.log(`⏭️  Skipped to stage: ${stage.name}\n`);
+                console.log(`▶️  Resuming at stage: ${stage.name}\n`);
             } else {
                 console.log(`⏭️  Skipping: ${stage.name}`);
                 continue;

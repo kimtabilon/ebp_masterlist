@@ -1,5 +1,5 @@
 /**
- * Tests for the pipeline orchestrator (EBP-17).
+ * Tests for the pipeline orchestrator (EBP-17, EBP-18).
  * Runs against master_list_test.
  *
  * Usage: npx tsx --test tests/orchestrator.test.ts
@@ -9,105 +9,131 @@ process.env.DB_NAME_OVERRIDE = "master_list_test";
 process.env.mUser = "tempUserMasterlist";
 process.env.pUser = "F4@zN!8qW2#Lp9$Xr6^tY3&m";
 
-import { describe, it, before, after } from "node:test";
+import { it, before, after } from "node:test";
 import assert from "node:assert/strict";
 
 import { getDb } from "../master_list/config/mongdodb.config.js";
 import { runPipeline } from "../master_list/controller/orchestrator.js";
 
-describe("Pipeline Orchestrator", () => {
-    let db: any;
+const LONG_TIMEOUT = 1200000; // 20 min
 
-    before(async () => {
-        db = await getDb("master_list");
-        assert.equal(db.databaseName, "master_list_test", "Safety: must run against test DB");
+let db: any;
 
-        // Verify we have seeded data
-        const responseCount = await db.collection("synnex_response_table").countDocuments();
-        assert.ok(responseCount > 0, `Need seeded response data (got ${responseCount})`);
+before(async () => {
+    db = await getDb("master_list");
+    assert.equal(db.databaseName, "master_list_test", "Safety: must run against test DB");
 
-        // Clean up from prior runs so validation doesn't fail on stale product_list_previous
-        await db.dropCollection("product_list_previous").catch(() => {});
-        await db.dropCollection("pipeline_runs").catch(() => {});
-    });
+    const responseCount = await db.collection("synnex_response_table").countDocuments();
+    assert.ok(responseCount > 0, `Need seeded response data (got ${responseCount})`);
 
-    it("runs from buildProductList stage onward (--skip-merge equivalent)", async () => {
-        await db.dropCollection("pipeline_runs").catch(() => {});
+    await db.dropCollection("product_list_previous").catch(() => {});
+    await db.dropCollection("pipeline_runs").catch(() => {});
+});
 
-        // Start from buildProductList — skips download, parse, merge, filters, response tables
-        await runPipeline({ startFromStage: "buildProductList" });
+it("runs from buildProductList stage onward", { timeout: LONG_TIMEOUT }, async () => {
+    await db.dropCollection("pipeline_runs").catch(() => {});
 
-        // Verify product list was built
-        const productCount = await db.collection("product_list").countDocuments();
-        assert.ok(productCount > 0, `Should have products (got ${productCount})`);
+    await runPipeline({ startFromStage: "buildProductList" });
 
-        // Verify audit log was persisted
-        const runRecord = await db.collection("pipeline_runs").findOne(
-            { status: "success" },
-            { sort: { completedAt: -1 } }
-        );
-        assert.ok(runRecord, "Should have a successful run record");
-        assert.ok(runRecord.stages.length >= 2, `Should have multiple stages logged (got ${runRecord.stages.length})`);
+    const productCount = await db.collection("product_list").countDocuments();
+    assert.ok(productCount > 0, `Should have products (got ${productCount})`);
 
-        // Verify the stages that ran
-        const stageNames = runRecord.stages.map((s: any) => s.name);
-        assert.ok(stageNames.includes("buildProductList"), "Should include buildProductList");
-        assert.ok(stageNames.includes("validateAndPromote"), "Should include validateAndPromote");
-    });
+    const runRecord = await db.collection("pipeline_runs").findOne(
+        { status: "success" },
+        { sort: { completedAt: -1 } }
+    );
+    assert.ok(runRecord, "Should have a successful run record");
+    assert.ok(runRecord.stages.length >= 2, `Should have multiple stages logged (got ${runRecord.stages.length})`);
 
-    it("skips stages before startFromStage", async () => {
-        await db.dropCollection("pipeline_runs").catch(() => {});
+    const stageNames = runRecord.stages.map((s: any) => s.name);
+    assert.ok(stageNames.includes("buildProductList"), "Should include buildProductList");
+    assert.ok(stageNames.includes("validateAndPromote"), "Should include validateAndPromote");
+});
 
-        await runPipeline({ startFromStage: "validateAndPromote" });
+it("skips stages before startFromStage", { timeout: LONG_TIMEOUT }, async () => {
+    await db.dropCollection("pipeline_runs").catch(() => {});
 
-        const runRecord = await db.collection("pipeline_runs").findOne(
-            { status: "success" },
-            { sort: { completedAt: -1 } }
-        );
-        assert.ok(runRecord, "Should have a run record");
+    await runPipeline({ startFromStage: "validateAndPromote" });
 
-        const stageNames = runRecord.stages.map((s: any) => s.name);
-        assert.ok(!stageNames.includes("downloadRaw"), "Should NOT include downloadRaw");
-        assert.ok(!stageNames.includes("buildProductList"), "Should NOT include buildProductList");
-        assert.ok(stageNames.includes("validateAndPromote"), "Should include validateAndPromote");
-    });
+    const runRecord = await db.collection("pipeline_runs").findOne(
+        { status: "success" },
+        { sort: { completedAt: -1 } }
+    );
+    assert.ok(runRecord, "Should have a run record");
 
-    it("persists per-stage timing in audit log", async () => {
-        await db.dropCollection("pipeline_runs").catch(() => {});
+    const stageNames = runRecord.stages.map((s: any) => s.name);
+    assert.ok(!stageNames.includes("downloadRaw"), "Should NOT include downloadRaw");
+    assert.ok(!stageNames.includes("buildProductList"), "Should NOT include buildProductList");
+    assert.ok(stageNames.includes("validateAndPromote"), "Should include validateAndPromote");
+});
 
-        await runPipeline({ startFromStage: "validateAndPromote" });
+it("persists per-stage timing in audit log", { timeout: LONG_TIMEOUT }, async () => {
+    await db.dropCollection("pipeline_runs").catch(() => {});
 
-        const runRecord = await db.collection("pipeline_runs").findOne(
-            {},
-            { sort: { completedAt: -1 } }
-        );
-        assert.ok(runRecord, "Should have a run record");
+    await runPipeline({ startFromStage: "validateAndPromote" });
 
-        for (const stage of runRecord.stages) {
-            assert.ok(typeof stage.name === "string", "Stage should have name");
-            assert.ok(typeof stage.durationSec === "number", "Stage should have durationSec");
-            assert.ok(typeof stage.heapDeltaMb === "number", "Stage should have heapDeltaMb");
-        }
-    });
+    const runRecord = await db.collection("pipeline_runs").findOne(
+        {},
+        { sort: { completedAt: -1 } }
+    );
+    assert.ok(runRecord, "Should have a run record");
 
-    it("non-critical stage failure does not halt pipeline", async () => {
-        // webhooks stage is non-critical — if it fails, pipeline continues
-        // Since we're in test, webhooks will fail (external URLs) but pipeline should succeed
-        await db.dropCollection("pipeline_runs").catch(() => {});
+    for (const stage of runRecord.stages) {
+        assert.ok(typeof stage.name === "string", "Stage should have name");
+        assert.ok(typeof stage.durationSec === "number", "Stage should have durationSec");
+        assert.ok(typeof stage.heapDeltaMb === "number", "Stage should have heapDeltaMb");
+    }
+});
 
-        // Run from buildProductList which includes webhooks at the end
-        await runPipeline({ startFromStage: "buildProductList" });
+it("non-critical stage failure does not halt pipeline", { timeout: LONG_TIMEOUT }, async () => {
+    await db.dropCollection("pipeline_runs").catch(() => {});
 
-        const runRecord = await db.collection("pipeline_runs").findOne(
-            { status: "success" },
-            { sort: { completedAt: -1 } }
-        );
-        assert.ok(runRecord, "Pipeline should still succeed despite webhook failures");
-    });
+    await runPipeline({ startFromStage: "buildProductList" });
 
-    after(async () => {
-        await db.dropCollection("pipeline_runs").catch(() => {});
-        await db.dropCollection("product_list_previous").catch(() => {});
-        process.exit(0);
-    });
+    const runRecord = await db.collection("pipeline_runs").findOne(
+        { status: "success" },
+        { sort: { completedAt: -1 } }
+    );
+    assert.ok(runRecord, "Pipeline should still succeed despite webhook failures");
+});
+
+it("resumed run is logged with resumed flag", { timeout: LONG_TIMEOUT }, async () => {
+    await db.dropCollection("pipeline_runs").catch(() => {});
+
+    await runPipeline({ startFromStage: "validateAndPromote" });
+
+    const runRecord = await db.collection("pipeline_runs").findOne(
+        { status: "success" },
+        { sort: { completedAt: -1 } }
+    );
+    assert.ok(runRecord, "Should have a run record");
+    assert.equal(runRecord.resumed, true, "Should be marked as resumed");
+    assert.equal(runRecord.resumedFromStage, "validateAndPromote", "Should record which stage was resumed from");
+});
+
+it("record has resume fields", { timeout: LONG_TIMEOUT }, async () => {
+    await db.dropCollection("pipeline_runs").catch(() => {});
+
+    await runPipeline({ startFromStage: "validateAndPromote" });
+
+    const runRecord = await db.collection("pipeline_runs").findOne(
+        {},
+        { sort: { completedAt: -1 } }
+    );
+    assert.ok("resumed" in runRecord, "Record should have resumed field");
+    assert.ok("resumedFromStage" in runRecord, "Record should have resumedFromStage field");
+});
+
+it("rejects invalid stage name", { timeout: LONG_TIMEOUT }, async () => {
+    await assert.rejects(
+        () => runPipeline({ startFromStage: "nonexistentStage" }),
+        /Unknown stage "nonexistentStage"/,
+        "Should throw on invalid stage name"
+    );
+});
+
+after(async () => {
+    await db.dropCollection("pipeline_runs").catch(() => {});
+    await db.dropCollection("product_list_previous").catch(() => {});
+    process.exit(0);
 });
