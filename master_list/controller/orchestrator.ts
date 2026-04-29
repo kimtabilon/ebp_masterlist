@@ -17,6 +17,7 @@ import { performance } from "perf_hooks";
 import axios from "axios";
 
 import { getDb } from "../config/mongdodb.config";
+import { log, logStageStart, logStageComplete, logStageError, logStageSkipped, logValidationResult, logPipelineSummary } from "../utils/logger";
 
 import downloadRaw from "./download_raw";
 import { runSynnex } from "./process_raw/synnex_parse";
@@ -266,12 +267,10 @@ export async function runPipeline(options?: OrchestratorOptions): Promise<void> 
         resumedFromStage: startFromStage,
     });
 
-    console.log("=================================================");
-    console.log(`  PIPELINE ORCHESTRATOR${isResumed ? " (RESUMED)" : ""}`);
-    console.log(`  Stages: ${stages.map(s => s.name).join(" → ")}`);
-    if (isResumed) console.log(`  Resuming from: ${startFromStage}`);
-    console.log(`  Started: ${new Date().toISOString()}`);
-    console.log("=================================================\n");
+    logPipelineSummary("started", 0, stages.length, {
+        resumed: isResumed,
+        ...(startFromStage ? { resumedFromStage: startFromStage } : {}),
+    });
 
     // Validate startFromStage exists
     if (startFromStage && !stages.find(s => s.name === startFromStage)) {
@@ -282,18 +281,17 @@ export async function runPipeline(options?: OrchestratorOptions): Promise<void> 
 
     let skipping = isResumed;
     let lastResult: any = null;
+    const pipelineStart = performance.now();
 
     for (const stage of stages) {
-        // Skip stages until we reach the resume point
         if (skipping) {
             if (stage.name === startFromStage) {
-                // Before resuming, validate that prior stages' outputs exist
-                console.log("🔍 Validating prior stages before resume...");
+                log("info", "pipeline", "Validating prior stages before resume...");
                 const priorStages = stages.slice(0, stages.indexOf(stage));
                 for (const prior of priorStages) {
                     if (prior.validate) {
                         const check = await prior.validate();
-                        console.log(`  ${prior.name}: ${check.detail}`);
+                        logValidationResult("resume", prior.name, check.ok, check.detail);
                         if (!check.ok && prior.critical) {
                             const error = `Cannot resume from "${startFromStage}" — prior stage "${prior.name}" output is invalid: ${check.detail}`;
                             await runLog.persist({ status: "failed", error });
@@ -301,17 +299,16 @@ export async function runPipeline(options?: OrchestratorOptions): Promise<void> 
                         }
                     }
                 }
-                console.log("✅ Prior stages validated\n");
-
+                log("info", "pipeline", "Prior stages validated");
                 skipping = false;
-                console.log(`▶️  Resuming at stage: ${stage.name}\n`);
+                log("info", "pipeline", `Resuming at stage: ${stage.name}`);
             } else {
-                console.log(`⏭️  Skipping: ${stage.name}`);
+                logStageSkipped(stage.name, "before resume point");
                 continue;
             }
         }
 
-        console.log(`🚀 STAGE: ${stage.name}`);
+        logStageStart(stage.name);
         const startTime = performance.now();
         const startHeap = process.memoryUsage().heapUsed;
 
@@ -321,29 +318,25 @@ export async function runPipeline(options?: OrchestratorOptions): Promise<void> 
             const durationSec = parseFloat(((performance.now() - startTime) / 1000).toFixed(2));
             const heapDeltaMb = parseFloat(((process.memoryUsage().heapUsed - startHeap) / 1024 / 1024).toFixed(2));
 
-            console.log(`✅ STAGE COMPLETE: ${stage.name} | ⏱ ${durationSec}s | Heap Δ ${heapDeltaMb} MB`);
-
+            logStageComplete(stage.name, durationSec, heapDeltaMb);
             runLog.addStage({ name: stage.name, durationSec, heapDeltaMb });
 
-            // Run validation if defined
             if (stage.validate) {
                 const validation = await stage.validate();
-                console.log(`   Validation: ${validation.detail}`);
+                logValidationResult(stage.name, "output", validation.ok, validation.detail);
 
                 if (!validation.ok) {
                     if (stage.critical) {
                         const error = `Stage "${stage.name}" validation failed: ${validation.detail}`;
-                        console.error(`❌ ${error}`);
+                        logStageError(stage.name, error);
                         await runLog.persist({ status: "failed", error });
                         await sendPipelineAlert({ type: "pipeline_error", error });
                         throw new Error(error);
                     } else {
-                        console.warn(`⚠️ Stage "${stage.name}" validation failed but stage is non-critical — continuing`);
+                        log("warn", stage.name, "Validation failed but stage is non-critical — continuing");
                     }
                 }
             }
-
-            console.log(""); // blank line between stages
 
         } catch (err: any) {
             const durationSec = parseFloat(((performance.now() - startTime) / 1000).toFixed(2));
@@ -353,23 +346,22 @@ export async function runPipeline(options?: OrchestratorOptions): Promise<void> 
 
             if (stage.critical) {
                 const error = `Pipeline halted at stage "${stage.name}": ${err.message}`;
-                console.error(`❌ ${error}`);
+                logStageError(stage.name, error);
                 await runLog.persist({ status: "failed", error }).catch(() => {});
                 await sendPipelineAlert({ type: "pipeline_error", error }).catch(() => {});
                 throw new Error(error);
             } else {
-                console.warn(`⚠️ Stage "${stage.name}" failed but is non-critical — continuing: ${err.message}\n`);
+                log("warn", stage.name, `Stage failed but non-critical — continuing: ${err.message}`);
             }
         }
     }
 
-    // Persist successful run — extract validation and diff from last stage result
+    const totalDurationSec = parseFloat(((performance.now() - pipelineStart) / 1000).toFixed(2));
     const validation = lastResult?.validation ?? null;
     const diff = lastResult?.diff ?? null;
     await runLog.persist({ status: "success", validation, diff });
 
-    console.log("=================================================");
-    console.log("  PIPELINE COMPLETE");
-    console.log(`  Finished: ${new Date().toISOString()}`);
-    console.log("=================================================");
+    logPipelineSummary("completed", totalDurationSec, runLog["stages"].length, {
+        resumed: isResumed,
+    });
 }
