@@ -1,10 +1,9 @@
 import app from "./app";
 import dotenv from "dotenv";
 dotenv.config();
-import { generateProdLIst,generateProdLIst2,generateProdLIst3,generateProdLIst4 } from "./controller/generate_master_list";
+import { runPipeline } from "./controller/orchestrator";
 import cron from "node-cron";
 
-//test
 const PORT = 5003;
 
 let pipelineRunning = false;
@@ -16,7 +15,7 @@ cron.schedule("0 */2 * * *", async () => {
     }
     pipelineRunning = true;
     try {
-        await generateProdLIst();
+        await runPipeline();
     } catch (err: any) {
         console.error("❌ [CRON] Error:", err.message);
     } finally {
