@@ -82,27 +82,27 @@ export const config = {
         database: () => optional("MYSQL_DB", "ecomm_ebp_test"),
     },
 
-    // SFTP credentials
+    // SFTP credentials (var names match download_raw.ts / production .env)
     sftp: {
         synnex: {
-            host: () => optional("SYNNEX_SFTP_HOST", ""),
-            user: () => optional("SYNNEX_SFTP_USER", ""),
-            pass: () => optional("SYNNEX_SFTP_PASS", ""),
+            host: () => optional("SYNNEX_FTP_HOST", ""),
+            user: () => optional("SYNNEX_FTP_USER", ""),
+            pass: () => optional("SYNNEX_FTP_PASS", ""),
         },
         dandh: {
             host: () => optional("DANDH_SFTP_HOST", ""),
-            user: () => optional("DANDH_SFTP_USER", ""),
-            pass: () => optional("DANDH_SFTP_PASS", ""),
+            user: () => optional("DANDH_FTP_USER", ""),
+            pass: () => optional("DANDH_FTP_PASS", ""),
         },
         ingram: {
             host: () => optional("INGRAM_SFTP_HOST", ""),
-            user: () => optional("INGRAM_SFTP_USER", ""),
-            pass: () => optional("INGRAM_SFTP_PASS", ""),
+            user: () => optional("INGRAM_FTP_USER", ""),
+            pass: () => optional("INGRAM_FTP_PASS", ""),
         },
         suppliesNetwork: {
             host: () => optional("SUPPLIESNETWORK_SFTP_HOST", ""),
             user: () => optional("SUPPLIESNETWORK_SFTP_USER", ""),
-            pass: () => optional("SUPPLIESNETWORK_SFTP_PASS", ""),
+            pass: () => optional("SUPPLIESNETWORK_SFTP_PASSWORD", ""),
         },
     },
 

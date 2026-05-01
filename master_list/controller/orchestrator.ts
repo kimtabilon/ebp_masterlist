@@ -233,6 +233,11 @@ function defineStages(): PipelineStage[] {
         {
             name: "webhooks",
             execute: async () => {
+                if (process.env.DB_NAME_OVERRIDE) {
+                    console.log("⏭️  Skipping webhooks (running against test DB)");
+                    return;
+                }
+
                 await Promise.all([
                     axios.get("https://console.ecommercebusinessprime.com/api/marketplace/updateInventory")
                         .then(() => console.log("✅ Webhook: updateInventory sent"))
