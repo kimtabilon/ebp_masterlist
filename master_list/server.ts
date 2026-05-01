@@ -3,6 +3,10 @@ import dotenv from "dotenv";
 dotenv.config();
 import fs from "fs";
 import path from "path";
+import { validateEnv } from "./config/env";
+
+// Validate required env vars before anything else
+validateEnv();
 import { runPipeline } from "./controller/orchestrator";
 import cron from "node-cron";
 import { log } from "./utils/logger";

@@ -2,6 +2,7 @@ import express, { Application, Request, Response } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import MasterListRoute from "./routes/master_list.route";
+import { requireApiKey } from "./middleware/auth";
 const app: Application = express();
 const allowedOrigins = [
     "https://envdev.ecommercebusinessprime.com",
@@ -32,6 +33,6 @@ app.use(cookieParser(process.env.COOKIE_TEXT));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.use("/api/v3", MasterListRoute);
+app.use("/api/v3", requireApiKey, MasterListRoute);
 
 export default app;
