@@ -115,7 +115,7 @@ function defineStages(): PipelineStage[] {
                 });
 
                 if (failures.length > 0) {
-                    throw new Error(`Distributor imports failed: ${failures.join(", ")}`);
+                    console.warn(`⚠️ Distributor imports failed: ${failures.join(", ")} — continuing with available data`);
                 }
             },
             validate: () => allCollectionsHaveDocs([

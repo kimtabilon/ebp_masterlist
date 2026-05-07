@@ -5,7 +5,7 @@ import { Request, Response } from "express";
 import { getDb } from "../../config/mongdodb.config";
 import { cleanString, normalizeManufacturer, normalizeUpc as normalizeUPC, normalizeSku } from "../../utils/normalize";
 // ---------------- CONFIG ----------------
-const INSERT_BATCH = 20000;
+const INSERT_BATCH = parseInt(process.env.INSERT_BATCH_SIZE || "50000", 10);
 const LOG_INTERVAL = 200000;
 
 const MANU_FILE = path.join(process.cwd(), "src/raw", "manufacturer report.xlsx");

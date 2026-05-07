@@ -725,11 +725,11 @@ export async function buildProductListStreaming() {
   await productList.createIndex({ normalized_sku: 1 }, { unique: true });
   await productList.createIndex({ sku: 1 });
 
-  // Ensure indexes on raw collections for enrichment lookups
-  await db.collection("dist_synnex_raw").createIndex({ normalized_sku: 1 });
-  await db.collection("dist_dandh_raw").createIndex({ sku: 1 });
-  await db.collection("dist_ingram_raw").createIndex({ sku: 1 });
-  await db.collection("dist_supplies_raw").createIndex({ sku: 1 });
+  // Ensure indexes on raw collections for enrichment lookups (may already exist from import stage)
+  await db.collection("dist_synnex_raw").createIndex({ normalized_sku: 1 }).catch(() => {});
+  await db.collection("dist_dandh_raw").createIndex({ sku: 1 }).catch(() => {});
+  await db.collection("dist_ingram_raw").createIndex({ sku: 1 }).catch(() => {});
+  await db.collection("dist_supplies_raw").createIndex({ sku: 1 }).catch(() => {});
 
   const now = new Date();
   let inserted = 0;
@@ -1350,9 +1350,12 @@ export async function fixMissingCategoriesFastv3(): Promise<{ updated: number }>
   }
 
   // -------------------- RUN ALL --------------------
-  await updateCategoryFromDistributor("supplies", "category_supplies");
-  await updateCategoryFromDistributor("ingram", "category_ingram");
-  await updateCategoryFromDistributor("dandh", "category_dandh");
+  // These write to separate fields — safe to parallelize
+  await Promise.all([
+    updateCategoryFromDistributor("supplies", "category_supplies"),
+    updateCategoryFromDistributor("ingram", "category_ingram"),
+    updateCategoryFromDistributor("dandh", "category_dandh"),
+  ]);
 
   console.time("CATEGORY_PROPAGATION_MERGE");
   await propagateCategoryFromField("category_supplies");

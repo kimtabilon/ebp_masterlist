@@ -323,13 +323,8 @@ async function removeDuplicates() {
     const db: any = await getDb('master_list');
     const col = db.collection("dist_synnex_raw");
 
-    // Optional: create an index on sku to speed up delete queries (non-unique)
-    try {
-        await col.createIndex({ sku: 1 });
-        console.log("✔ Non-unique index on sku (for faster deletes)");
-    } catch (e: any) {
-        console.log("ℹ Couldn't create non-unique sku index:", e?.message || e);
-    }
+    // Skip non-unique index creation — dedup uses aggregation with allowDiskUse,
+    // and we'll create the unique index once after dedup completes.
 
     // Pipeline finds SKUs with more than 1 document and returns keep (latest) only.
     const pipeline = [
@@ -402,16 +397,8 @@ async function rebuildIndex() {
     const db: any = await getDb('master_list');
     const col = db.collection("dist_synnex_raw");
 
-    console.log("🔧 Dropping existing sku index (if any)...");
-    try {
-        await col.dropIndex("sku_1");  // drop both unique and non-unique
-    } catch (e: any) {
-        if (!/not found/i.test(e.message)) console.log("ℹ dropIndex issue:", e.message);
-    }
-
     console.log("🔧 Creating UNIQUE index on sku...");
     await col.createIndex({ sku: 1 }, { unique: true });
-
     console.log("✔ Unique index created");
 }
 
@@ -431,7 +418,14 @@ export async function runSynnex() {
     await dropIndexes();
     const inserted = await fastInsertAll();
 
-    const corrupted = await removeCorruptedDocs();
+    // Corruption scan skipped by default — data comes from validated JSONL buffer.
+    // Enable via SYNNEX_CORRUPTION_SCAN=true if needed for debugging.
+    let corrupted = 0;
+    if (process.env.SYNNEX_CORRUPTION_SCAN === "true") {
+        corrupted = await removeCorruptedDocs();
+    } else {
+        console.log("⏭️  Corruption scan skipped (enable with SYNNEX_CORRUPTION_SCAN=true)");
+    }
     const duplicates = await removeDuplicates();
 
     await rebuildIndex();

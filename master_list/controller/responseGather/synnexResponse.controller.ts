@@ -78,44 +78,65 @@ function processPriceAvailabilityNode(nodeXmlRaw: string) {
   return { sku, price, totalQty: totalQtyFromWarehouses, modifiedXml: modifiedNodeXml };
 }
 
-async function synnexPriceAvailabilityListOnly(combinedXml: string) {
-  const wrapped = `<Root>${combinedXml}</Root>`;
-  const parsed: any = await parseStringPromise(wrapped, {
-    explicitArray: false,
-    ignoreAttrs: false,
-    trim: true,
-    normalize: true,
-    explicitRoot: false,
-  });
+function formatParsedNode(n: any) {
+  const whRaw = n?.AvailabilityByWarehouse;
+  const warehouses = Array.isArray(whRaw) ? whRaw : whRaw ? [whRaw] : [];
+
+  return {
+    synnexSKU: firstText(n?.synnexSKU),
+    mfgPN: firstText(n?.mfgPN),
+    mfgCode: firstText(n?.mfgCode),
+    status: firstText(n?.status),
+    description: firstText(n?.description),
+    GlobalProductStatusCode: firstText(n?.GlobalProductStatusCode),
+    price: toNum(firstText(n?.price)),
+    totalQuantity: toNum(firstText(n?.totalQuantity)) ?? 0,
+    lineNumber: firstText(n?.lineNumber),
+    AvailabilityByWarehouse: warehouses.map((w: any) => ({
+      warehouseInfo: {
+        number: firstText(w?.warehouseInfo?.number),
+        zipcode: firstText(w?.warehouseInfo?.zipcode),
+        city: firstText(w?.warehouseInfo?.city),
+        addr: firstText(w?.warehouseInfo?.addr),
+      },
+      qty: toNum(firstText(w?.qty)) ?? 0,
+    })),
+  };
+}
+
+/**
+ * Parse the full API response XML once and return a map of SKU → formatted nodes.
+ * Replaces per-SKU parseStringPromise calls.
+ */
+async function parseFullResponse(modifiedXmlBySku: Record<string, string[]>): Promise<Record<string, any[]>> {
+  const allXml = Object.values(modifiedXmlBySku).flat().join("\n");
+  if (!allXml.trim()) return {};
+
+  const wrapped = `<Root>${allXml}</Root>`;
+  let parsed: any;
+  try {
+    parsed = await parseStringPromise(wrapped, {
+      explicitArray: false,
+      ignoreAttrs: false,
+      trim: true,
+      normalize: true,
+      explicitRoot: false,
+    });
+  } catch {
+    return {};
+  }
 
   const listsRaw = parsed?.PriceAvailabilityList;
   const lists = Array.isArray(listsRaw) ? listsRaw : listsRaw ? [listsRaw] : [];
 
-  return lists.map((n: any) => {
-    const whRaw = n?.AvailabilityByWarehouse;
-    const warehouses = Array.isArray(whRaw) ? whRaw : whRaw ? [whRaw] : [];
-
-    return {
-      synnexSKU: firstText(n?.synnexSKU),
-      mfgPN: firstText(n?.mfgPN),
-      mfgCode: firstText(n?.mfgCode),
-      status: firstText(n?.status),
-      description: firstText(n?.description),
-      GlobalProductStatusCode: firstText(n?.GlobalProductStatusCode),
-      price: toNum(firstText(n?.price)),
-      totalQuantity: toNum(firstText(n?.totalQuantity)) ?? 0,
-      lineNumber: firstText(n?.lineNumber),
-      AvailabilityByWarehouse: warehouses.map((w: any) => ({
-        warehouseInfo: {
-          number: firstText(w?.warehouseInfo?.number),
-          zipcode: firstText(w?.warehouseInfo?.zipcode),
-          city: firstText(w?.warehouseInfo?.city),
-          addr: firstText(w?.warehouseInfo?.addr),
-        },
-        qty: toNum(firstText(w?.qty)) ?? 0,
-      })),
-    };
-  });
+  const result: Record<string, any[]> = {};
+  for (const n of lists) {
+    const sku = cleanString(firstText(n?.mfgPN));
+    if (!sku) continue;
+    if (!result[sku]) result[sku] = [];
+    result[sku].push(formatParsedNode(n));
+  }
+  return result;
 }
 
 export async function buildSynnexResponseTable() {
@@ -204,7 +225,7 @@ export async function buildSynnexResponseTable() {
   if (totalSkuCount === 0) return true;
 
   const allSkus = Object.keys(skuMeta).map(cleanString);
-  const batchSize = 10;
+  const batchSize = parseInt(process.env.SYNNEX_BATCH_SIZE || "50", 10);
   const batches: string[][] = [];
   for (let i = 0; i < allSkus.length; i += batchSize) batches.push(allSkus.slice(i, i + batchSize));
 
@@ -276,6 +297,13 @@ export async function buildSynnexResponseTable() {
           results[sku].nodes.push({ price: processed.price, qty: processed.totalQty, xml: processed.modifiedXml });
         }
 
+        // Single XML parse for the entire batch instead of per-SKU
+        const modifiedXmlBySku: Record<string, string[]> = {};
+        for (const [sku, entry] of Object.entries(results)) {
+          modifiedXmlBySku[sku] = entry.nodes.map((n) => n.xml);
+        }
+        const parsedResponses = await parseFullResponse(modifiedXmlBySku);
+
         for (const skuKey of Object.keys(results)) {
           const sku = cleanString(skuKey);
           const entry = results[sku];
@@ -285,14 +313,6 @@ export async function buildSynnexResponseTable() {
           if (valid.length) lowestPrice = Math.min(...valid.map((x) => x.price as number));
 
           const totalQtyAcrossNodes = entry.nodes.reduce((acc, n) => acc + (n.qty || 0), 0);
-          const combinedXml = entry.nodes.map((n) => n.xml).join("\n");
-
-          let synnexResponse: any = null;
-          try {
-            synnexResponse = await synnexPriceAvailabilityListOnly(combinedXml);
-          } catch {
-            synnexResponse = null;
-          }
 
           const meta = skuMeta[sku];
 
@@ -307,7 +327,7 @@ export async function buildSynnexResponseTable() {
             synnex_status: "ok",
             synnex_price: lowestPrice,
             synnex_quantity: totalQtyAcrossNodes,
-            synnex_response: synnexResponse,
+            synnex_response: parsedResponses[sku] ?? null,
             created_at: now,
             updated_at: now,
           });
