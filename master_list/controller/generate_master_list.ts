@@ -20,6 +20,10 @@ import { buildSuppliesNetworkResponseTable } from "./responseGather/suppliesNetw
 import { buildSynnexResponseTable } from "./responseGather/synnexResponse.controller"
 import { processBundlesMongo } from "./sku_packed"
 import { syncMongoToMysql } from "./sync_master"
+import { validateProductList, promoteProductList, rollbackProductList } from "./validation/validateProductList"
+import { diffProductList } from "./validation/diffProductList"
+import { PipelineRunCollector } from "./validation/pipelineRunLog"
+import { sendPipelineAlert } from "./validation/alerting"
 
 import { getDb } from "../config/mongdodb.config";
 
@@ -58,8 +62,10 @@ export async function testParallelRun() {
 }
 
 export async function generateProdLIst() {
+    const runLog = new PipelineRunCollector();
+
     try {
-        await measure("downloadRaw", () => downloadRaw());
+        await measure("downloadRaw", () => downloadRaw(), runLog);
 
         await measure("parallel imports", async () => {
           const importResults = await Promise.allSettled([
@@ -82,18 +88,17 @@ export async function generateProdLIst() {
           if (failures.length > 0) {
             throw new Error(`Pipeline aborted — distributor imports failed: ${failures.join(", ")}`);
           }
-        });
+        }, runLog);
 
-        await measure("runMergeSuperFast", () => runMergeSuperFast());
-        // await measure("buildGroupedUPCData", () => buildGroupedUPCData());
+        await measure("runMergeSuperFast", () => runMergeSuperFast(), runLog);
 
-        await measure("exportSameSkuToXlsx", () => exportSameSkuToXlsx());
-        await measure("exportSameUpcToXlsx", () => exportSameUpcToXlsx());
+        await measure("exportSameSkuToXlsx", () => exportSameSkuToXlsx(), runLog);
+        await measure("exportSameUpcToXlsx", () => exportSameUpcToXlsx(), runLog);
         await measure("insertAllNullManufacturerMapSkus", () =>
           insertAllNullManufacturerMapSkus()
-        );
-        await measure("exportNullUpcToXlsx", () => exportNullUpcToXlsx());
-        await measure("buildGroupedUpcData", () => buildGroupedUpcData());
+        , runLog);
+        await measure("exportNullUpcToXlsx", () => exportNullUpcToXlsx(), runLog);
+        await measure("buildGroupedUpcData", () => buildGroupedUpcData(), runLog);
 
         await measure("parallel response table builds", async () => {
           const responseResults = await Promise.allSettled([
@@ -116,15 +121,61 @@ export async function generateProdLIst() {
           if (responseFailures.length > 0) {
             console.error(`⚠️ Response table builds failed: ${responseFailures.join(", ")} — continuing with available data`);
           }
-        });
+        }, runLog);
 
-        await measure("buildProductList", () => buildProductList());
+        // Preserve current product_list as backup before rebuilding
+        const db = await getDb("master_list");
+        try {
+            await db.admin().command({
+                renameCollection: `${db.databaseName}.product_list`,
+                to: `${db.databaseName}.product_list_previous`,
+                dropTarget: true,
+            });
+            console.log("✅ Preserved current product_list as product_list_previous");
+        } catch {
+            console.log("ℹ️ No existing product_list to preserve (first run or already moved)");
+        }
 
-        // await measure("fixMissingCategoriesFast", () => fixMissingCategoriesFast());
-        // await measure("fixMissingCategoriesFastko", () => fixMissingCategoriesFastko());
-        // await measure("fixMissingCategoriesFast (again)", () => fixMissingCategoriesFast());
-        // await measure("fixMissingCategoriesFastko (again)", () => fixMissingCategoriesFastko());
-        await measure("processBundlesMongo", () => processBundlesMongo());
+        await measure("buildProductList", () => buildProductList(), runLog);
+        await measure("processBundlesMongo", () => processBundlesMongo(), runLog);
+
+        // Validate the new product list before promoting
+        const validation = await measure("validateProductList", () => validateProductList(), runLog);
+
+        console.log("=================================================");
+        console.log("VALIDATION RESULTS:");
+        for (const check of validation.checks) {
+            console.log(`  ${check.passed ? "✅" : "❌"} ${check.name}: ${check.detail}`);
+        }
+        console.log("=================================================");
+
+        if (!validation.passed) {
+            console.error("❌ Validation FAILED — rolling back to previous product list");
+            await rollbackProductList();
+            await runLog.persist({ status: "rolled_back", validation, error: "Validation failed" });
+            await sendPipelineAlert({ type: "validation_failed", validation });
+            throw new Error(`Product list validation failed: ${validation.checks.filter(c => !c.passed).map(c => c.name).join(", ")}`);
+        }
+
+        // Compute diff before dropping the backup (needs product_list_previous)
+        const diff = await measure("diffProductList", () => diffProductList(), runLog);
+
+        console.log("=================================================");
+        console.log("RUN DIFF SUMMARY:");
+        console.log(`  Added: ${diff.added} | Removed: ${diff.removed}`);
+        console.log(`  Price changes: ${diff.priceChanges} | Inventory swings: ${diff.inventorySwings}`);
+        console.log(`  Distributor changes: ${diff.distributorChanges}`);
+        console.log("=================================================");
+
+        // Alert on anomalous diff (large removals or widespread price changes)
+        if (diff.removed > 5000 || diff.priceChanges > 1000) {
+            await sendPipelineAlert({ type: "anomaly_detected", diff,
+                error: `Anomalous diff: ${diff.removed} products removed, ${diff.priceChanges} price changes`
+            });
+        }
+
+        // Validation passed — drop the backup
+        await promoteProductList();
 
         await Promise.all([
             axios.get(`https://console.ecommercebusinessprime.com/api/marketplace/updateInventory`)
@@ -137,6 +188,9 @@ export async function generateProdLIst() {
                 .then(() => console.log("✅ Webhook: updateNeweggInventory sent"))
                 .catch((err: any) => console.error("❌ Webhook: updateNeweggInventory failed:", err?.message)),
         ]);
+
+        // Persist successful run log
+        await runLog.persist({ status: "success", validation, diff });
         
         /*await downloadRaw()
         await Promise.all([
@@ -170,11 +224,13 @@ export async function generateProdLIst() {
         return ("generateProdLIst1 DONE")
     } catch (e: any) {
         console.error("❌ [generateProdLIst] Pipeline failed:", e?.message || e);
+        await runLog.persist({ status: "failed", error: e?.message || String(e) }).catch(() => {});
+        await sendPipelineAlert({ type: "pipeline_error", error: e?.message || String(e) }).catch(() => {});
         throw e;
     }
 }
 
-async function measure<T>(name: string, fn: () => Promise<T>): Promise<T> {
+async function measure<T>(name: string, fn: () => Promise<T>, runLog?: PipelineRunCollector): Promise<T> {
   console.log(`🚀 START: ${name}`);
 
   const startTime = performance.now();
@@ -185,21 +241,25 @@ async function measure<T>(name: string, fn: () => Promise<T>): Promise<T> {
   const endTime = performance.now();
   const endHeap = process.memoryUsage().heapUsed;
 
-  const duration = ((endTime - startTime) / 1000).toFixed(2);
-  const heapDiff = ((endHeap - startHeap) / 1024 / 1024).toFixed(2);
+  const durationSec = parseFloat(((endTime - startTime) / 1000).toFixed(2));
+  const heapDeltaMb = parseFloat(((endHeap - startHeap) / 1024 / 1024).toFixed(2));
 
   const db: any = await getDb("ebp_marketplace");
   const collection = db.collection("logs");
 
   collection.insertOne({
     from: 'masterlist',
-    info: `✅ DONE: ${name} | ⏱ ${duration}s | Heap Δ ${heapDiff} MB`,
+    info: `✅ DONE: ${name} | ⏱ ${durationSec}s | Heap Δ ${heapDeltaMb} MB`,
     createdAt: new Date()
   });
 
   console.log(
-    `✅ DONE: ${name} | ⏱ ${duration}s | Heap Δ ${heapDiff} MB`
+    `✅ DONE: ${name} | ⏱ ${durationSec}s | Heap Δ ${heapDeltaMb} MB`
   );
+
+  if (runLog) {
+    runLog.addStage({ name, durationSec, heapDeltaMb });
+  }
 
   return result;
 }
