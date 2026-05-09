@@ -1,14 +1,15 @@
 import mongoose, { Connection } from "mongoose";
+import { config } from "./env";
 
 let baseConnection: Connection | null = null;
 
 export async function connectMongoBase(): Promise<Connection> {
   if (baseConnection) return baseConnection;
 
-  const user = encodeURIComponent(process.env.mUser || "");
-  const pass = encodeURIComponent(process.env.pUser || "");
-  const host = "64.225.124.70";
-  const port = "27018";
+  const user = encodeURIComponent(config.mongo.user());
+  const pass = encodeURIComponent(config.mongo.pass());
+  const host = config.mongo.host();
+  const port = config.mongo.port();
   const uri = `mongodb://${user}:${pass}@${host}:${port}/?authSource=admin`;
 
   const m = await mongoose.connect(uri);
@@ -16,16 +17,14 @@ export async function connectMongoBase(): Promise<Connection> {
   return baseConnection;
 }
 
-// ✅ No "mongodb" import here
 export async function getDb(dbName: string) {
-  // Allow overriding master_list → master_list_test for testing
-  const resolvedName = (dbName === "master_list" && process.env.DB_NAME_OVERRIDE)
-    ? process.env.DB_NAME_OVERRIDE
+  const resolvedName = (dbName === "master_list" && config.test.dbNameOverride())
+    ? config.test.dbNameOverride()
     : dbName;
 
   const baseConn = await connectMongoBase();
   const conn = baseConn.useDb(resolvedName, { useCache: true });
 
   if (!conn.db) throw new Error("Mongo DB not ready");
-  return conn.db; // inferred type from mongoose's mongodb
+  return conn.db;
 }

@@ -3,8 +3,9 @@ import fs from "fs";
 import dotenv from "dotenv";
 import path from "path";
 import Client from "ssh2-sftp-client";
+import { config } from "../config/env";
 dotenv.config();
-const localBaseDir = path.join(process.cwd(), "master_list", "raw");
+const localBaseDir = path.join(process.cwd(), config.paths.rawDir());
 if (!fs.existsSync(localBaseDir)) fs.mkdirSync(localBaseDir, { recursive: true });
 
 
@@ -34,20 +35,19 @@ async function downloadSynnex() {
         const localZipPath = path.join(localBaseDir, "synnex-pa.zip");
         const localCategoryPath = path.join(localBaseDir, "category_list.txt");
 
-        if (
-            !process.env.SYNNEX_FTP_USER ||
-            !process.env.SYNNEX_FTP_PASS ||
-            !process.env.SYNNEX_FTP_HOST
-        ) {
+        const host = config.sftp.synnex.host();
+        const user = config.sftp.synnex.user();
+        const pass = config.sftp.synnex.pass();
+
+        if (!host || !user || !pass) {
             throw new Error("Missing Synnex SFTP credentials in .env");
         }
 
-        // 🔐 CONNECT TO SFTP
         await client.connect({
-            host: process.env.SYNNEX_FTP_HOST,
-            username: process.env.SYNNEX_FTP_USER,
-            password: process.env.SYNNEX_FTP_PASS,
-            port: 22, // SFTP default port
+            host,
+            username: user,
+            password: pass,
+            port: 22,
         });
 
         console.log("Connected to Synnex SFTP server");
@@ -84,29 +84,20 @@ async function downloadSuppliesRaw() {
         const remoteFile = "4015068_PriceExport.CSV";
         const localCsvPath = path.join(localBaseDir, "4015068_PriceExport.CSV");
 
-        if (
-            !process.env.SUPPLIESNETWORK_SFTP_HOST ||
-            !process.env.SUPPLIESNETWORK_SFTP_USER ||
-            !process.env.SUPPLIESNETWORK_SFTP_PASSWORD
-        ) {
+        const host = config.sftp.suppliesNetwork.host();
+        const user = config.sftp.suppliesNetwork.user();
+        const pass = config.sftp.suppliesNetwork.pass();
+
+        if (!host || !user || !pass) {
             throw new Error("Missing Supplies Network SFTP credentials in .env");
         }
-        console.log(process.env.SUPPLIESNETWORK_SFTP_HOST,
-            process.env.SUPPLIESNETWORK_SFTP_USER,
-            process.env.SUPPLIESNETWORK_SFTP_PASSWORD)
+
         await client.connect({
-            host: process.env.SUPPLIESNETWORK_SFTP_HOST!.trim(),
+            host: host.trim(),
             port: 22,
-            username: process.env.SUPPLIESNETWORK_SFTP_USER!.trim(),
-            password: "o@z6#aAWX8vLc+g_--",
-
+            username: user.trim(),
+            password: pass.trim(),
             tryKeyboard: true,
-
-            // // 🔥 THIS IS THE IMPORTANT PART
-            // onKeyboardInteractive: (name, instructions, instructionsLang, prompts, finish) => {
-            //     finish([process.env.SUPPLIESNETWORK_SFTP_PASSWORD!.trim()]);
-            // },
-
             readyTimeout: 30000,
         });
         await client.fastGet(
@@ -129,15 +120,19 @@ async function downloadIngram() {
 
         if (!fs.existsSync(localBaseDir)) fs.mkdirSync(localBaseDir, { recursive: true });
 
-        const { INGRAM_SFTP_HOST, INGRAM_FTP_USER, INGRAM_FTP_PASS } = process.env;
-        if (!INGRAM_SFTP_HOST || !INGRAM_FTP_USER || !INGRAM_FTP_PASS) {
-            throw new Error("❌ Missing Ingram FTP credentials in .env");
+        const host = config.sftp.ingram.host();
+        const user = config.sftp.ingram.user();
+        const pass = config.sftp.ingram.pass();
+
+        if (!host || !user || !pass) {
+            throw new Error("Missing Ingram SFTP credentials in .env");
         }
+
         await client.connect({
-            host: INGRAM_SFTP_HOST,
-            username: INGRAM_FTP_USER,
-            password: INGRAM_FTP_PASS,
-            port: 22,       // 🔁 Change to 22 if your server uses SFTP/FTPS on 22
+            host,
+            username: user,
+            password: pass,
+            port: 22,
         });
 
         console.log("📂 Connected to Ingram FTP server");
@@ -161,19 +156,21 @@ async function downloadDandHRaw() {
         console.log("Start Downloading Dandh raw File")
         const localItemFile = path.join(localBaseDir, "dandh-pa");
         const localCatFile = path.join(localBaseDir, "CATLIST");
-        const { DANDH_SFTP_HOST, DANDH_FTP_USER, DANDH_FTP_PASS } = process.env;
-        // Validate credentials
-        if (!DANDH_SFTP_HOST || !DANDH_FTP_USER || !DANDH_FTP_PASS) {
-            throw new Error("❌ Missing D&H FTP credentials in .env");
+        const host = config.sftp.dandh.host();
+        const user = config.sftp.dandh.user();
+        const pass = config.sftp.dandh.pass();
+
+        if (!host || !user || !pass) {
+            throw new Error("Missing D&H SFTP credentials in .env");
         }
+
         const client = new Client();
 
         await client.connect({
-            host: DANDH_SFTP_HOST,
-            username: DANDH_FTP_USER,
-            password: DANDH_FTP_PASS,
-            port: 22,       // Change to 22 if D&H uses SFTP/FTPS
-
+            host,
+            username: user,
+            password: pass,
+            port: 22,
         });
 
         console.log("📂 Connected to D&H FTP server");

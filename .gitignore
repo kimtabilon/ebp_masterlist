@@ -5,3 +5,4 @@ master_list/raw
 buffer
 PRICE
 src/raw
+.env
