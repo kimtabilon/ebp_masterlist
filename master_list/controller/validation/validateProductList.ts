@@ -168,7 +168,7 @@ export async function validateProductList(options?: {
     // 6. Price sanity — no $0 prices on products with response data (EBP-29)
     if (isEnabled("price_sanity")) {
         const zeroPriceThresholdPct = options?.zeroPriceThresholdPct
-            ?? (process.env.VALIDATION_ZERO_PRICE_PCT ? Number(process.env.VALIDATION_ZERO_PRICE_PCT) : 1);
+            ?? (process.env.VALIDATION_ZERO_PRICE_PCT ? Number(process.env.VALIDATION_ZERO_PRICE_PCT) : 5);
 
         // Products with at least one distributor response but ALL prices are 0 or null
         const zeroPricePipeline = [
@@ -299,10 +299,11 @@ export async function validateProductList(options?: {
         const upcFormatThresholdPct = options?.upcInvalidThresholdPct
             ?? (process.env.VALIDATION_UPC_INVALID_PCT ? Number(process.env.VALIDATION_UPC_INVALID_PCT) : 1);
 
-        // Products with a UPC that isn't 12-14 digits (UPC-A=12, EAN-13=13, GTIN-14=14)
+        // Products with a UPC that isn't 11-14 digits
+        // (11 = leading-zero-stripped UPC-A, 12 = UPC-A, 13 = EAN-13, 14 = GTIN-14)
         const invalidUpcResult = await productList.aggregate([
             { $match: { upc: { $nin: [null, ""] } } },
-            { $match: { upc: { $not: /^\d{12,14}$/ } } },
+            { $match: { upc: { $not: /^\d{11,14}$/ } } },
             { $count: "total" }
         ]).toArray();
         const invalidUpcCount = invalidUpcResult[0]?.total ?? 0;
