@@ -17,10 +17,17 @@ export interface ValidationResult {
  * Env vars: VALIDATION_COUNT_THRESHOLD_PCT, VALIDATION_MAX_INVENTORY_MULTIPLIER
  */
 export async function validateProductList(options?: {
-    countThresholdPct?: number;          // max % deviation from previous run (default 10)
-    maxInventoryMultiplier?: number;     // max single-run inventory increase (default 100)
-    coverageMismatchPct?: number;        // max % of products with distributor coverage gaps (default 1)
-    disabledChecks?: string[];           // check names to skip (e.g., ["distributor_coverage"])
+    countThresholdPct?: number;              // max % deviation from previous run (default 10)
+    maxInventoryMultiplier?: number;         // max single-run inventory increase (default 100)
+    coverageMismatchPct?: number;            // max % of products with distributor coverage gaps (default 1)
+    zeroPriceThresholdPct?: number;          // max % of products with no valid pricing (default 1)
+    mfgUnmappedThresholdPct?: number;        // max % of products without manufacturer_map (default 20)
+    responseIncompleteThresholdPct?: number; // max % of products with incomplete response data (default 5)
+    nameNullThresholdPct?: number;           // max % of products without name (default 1)
+    categoryNullThresholdPct?: number;       // max % of products without category_class (default 30)
+    upcInvalidThresholdPct?: number;         // max % of products with non-standard UPC format (default 1)
+    skuUpcChangedThreshold?: number;         // max number of SKUs that changed UPC between runs (default 50)
+    disabledChecks?: string[];               // check names to skip
 }): Promise<ValidationResult> {
     const db = await getDb("master_list");
     const productList = db.collection("product_list");
@@ -155,6 +162,218 @@ export async function validateProductList(options?: {
             detail: missingDistributors.length === 0
                 ? "All 5 distributors contribute products"
                 : `Missing distributors: ${missingDistributors.join(", ")}`
+        });
+    }
+
+    // 6. Price sanity — no $0 prices on products with response data (EBP-29)
+    if (isEnabled("price_sanity")) {
+        const zeroPriceThresholdPct = options?.zeroPriceThresholdPct
+            ?? (process.env.VALIDATION_ZERO_PRICE_PCT ? Number(process.env.VALIDATION_ZERO_PRICE_PCT) : 5);
+
+        // Products with at least one distributor response but ALL prices are 0 or null
+        const zeroPricePipeline = [
+            { $match: { distributor_list: { $exists: true, $not: { $size: 0 } } } },
+            {
+                $match: {
+                    $and: [
+                        { $or: [{ synnex_price: null }, { synnex_price: 0 }] },
+                        { $or: [{ dandh_price: null }, { dandh_price: 0 }] },
+                        { $or: [{ ingram_price: null }, { ingram_price: 0 }] },
+                        { $or: [{ supplies_price: null }, { supplies_price: 0 }] },
+                        { $or: [{ almo_price: null }, { almo_price: 0 }] },
+                    ]
+                }
+            },
+            { $count: "total" }
+        ];
+        const zeroPriceResult = await productList.aggregate(zeroPricePipeline).toArray();
+        const zeroPriceCount = zeroPriceResult[0]?.total ?? 0;
+        const zeroPricePct = currentCount > 0 ? (zeroPriceCount / currentCount) * 100 : 0;
+        const pricePassed = zeroPricePct <= zeroPriceThresholdPct;
+
+        checks.push({
+            name: "price_sanity",
+            passed: pricePassed,
+            detail: pricePassed
+                ? `${zeroPriceCount} products with no valid pricing (${zeroPricePct.toFixed(2)}%, threshold: ${zeroPriceThresholdPct}%)`
+                : `${zeroPriceCount} products with no valid pricing (${zeroPricePct.toFixed(2)}%) exceeds threshold of ${zeroPriceThresholdPct}%`
+        });
+    }
+
+    // 7. Manufacturer mapping coverage (EBP-30)
+    if (isEnabled("manufacturer_coverage")) {
+        const mfgThresholdPct = options?.mfgUnmappedThresholdPct
+            ?? (process.env.VALIDATION_MFG_UNMAPPED_PCT ? Number(process.env.VALIDATION_MFG_UNMAPPED_PCT) : 20);
+
+        const nullMfgCount = await productList.countDocuments({
+            $or: [{ manufacturer_map: null }, { manufacturer_map: "" }]
+        });
+        const nullMfgPct = currentCount > 0 ? (nullMfgCount / currentCount) * 100 : 0;
+        const mfgPassed = nullMfgPct <= mfgThresholdPct;
+
+        checks.push({
+            name: "manufacturer_coverage",
+            passed: mfgPassed,
+            detail: mfgPassed
+                ? `${nullMfgCount} products without manufacturer_map (${nullMfgPct.toFixed(1)}%, threshold: ${mfgThresholdPct}%)`
+                : `${nullMfgCount} products without manufacturer_map (${nullMfgPct.toFixed(1)}%) exceeds threshold of ${mfgThresholdPct}%`
+        });
+    }
+
+    // 8. Response data completeness (EBP-31)
+    if (isEnabled("response_completeness")) {
+        const completenessThresholdPct = options?.responseIncompleteThresholdPct
+            ?? (process.env.VALIDATION_RESPONSE_INCOMPLETE_PCT ? Number(process.env.VALIDATION_RESPONSE_INCOMPLETE_PCT) : 5);
+
+        // Products where a distributor is in the list but price AND quantity are both null
+        const incompletePipeline = [
+            {
+                $match: {
+                    $or: [
+                        { distributor_list: "synnex", synnex_price: null, synnex_quantity: null },
+                        { distributor_list: "dandh", dandh_price: null, dandh_quantity: null },
+                        { distributor_list: "ingram", ingram_price: null, ingram_quantity: null },
+                        { distributor_list: "supplies", supplies_price: null, supplies_count: null },
+                        { distributor_list: "almo", almo_price: null, almo_quantity: null },
+                    ]
+                }
+            },
+            { $count: "total" }
+        ];
+        const incompleteResult = await productList.aggregate(incompletePipeline).toArray();
+        const incompleteCount = incompleteResult[0]?.total ?? 0;
+        const incompletePct = currentCount > 0 ? (incompleteCount / currentCount) * 100 : 0;
+        const completenessPassed = incompletePct <= completenessThresholdPct;
+
+        checks.push({
+            name: "response_completeness",
+            passed: completenessPassed,
+            detail: completenessPassed
+                ? `${incompleteCount} products with incomplete response data (${incompletePct.toFixed(2)}%, threshold: ${completenessThresholdPct}%)`
+                : `${incompleteCount} products with incomplete response data (${incompletePct.toFixed(2)}%) exceeds threshold of ${completenessThresholdPct}%`
+        });
+    }
+
+    // 9. Product name coverage — products without a name are unusable
+    if (isEnabled("name_coverage")) {
+        const nameThresholdPct = options?.nameNullThresholdPct
+            ?? (process.env.VALIDATION_NAME_NULL_PCT ? Number(process.env.VALIDATION_NAME_NULL_PCT) : 1);
+
+        const nullNameCount = await productList.countDocuments({
+            $or: [{ name: null }, { name: "" }]
+        });
+        const nullNamePct = currentCount > 0 ? (nullNameCount / currentCount) * 100 : 0;
+        const namePassed = nullNamePct <= nameThresholdPct;
+
+        checks.push({
+            name: "name_coverage",
+            passed: namePassed,
+            detail: namePassed
+                ? `${nullNameCount} products without name (${nullNamePct.toFixed(2)}%, threshold: ${nameThresholdPct}%)`
+                : `${nullNameCount} products without name (${nullNamePct.toFixed(2)}%) exceeds threshold of ${nameThresholdPct}%`
+        });
+    }
+
+    // 10. Category coverage — null category_class indicates broken category resolution
+    if (isEnabled("category_coverage")) {
+        const catThresholdPct = options?.categoryNullThresholdPct
+            ?? (process.env.VALIDATION_CATEGORY_NULL_PCT ? Number(process.env.VALIDATION_CATEGORY_NULL_PCT) : 30);
+
+        const nullCatCount = await productList.countDocuments({
+            $or: [{ category_class: null }, { category_class: "" }]
+        });
+        const nullCatPct = currentCount > 0 ? (nullCatCount / currentCount) * 100 : 0;
+        const catPassed = nullCatPct <= catThresholdPct;
+
+        checks.push({
+            name: "category_coverage",
+            passed: catPassed,
+            detail: catPassed
+                ? `${nullCatCount} products without category (${nullCatPct.toFixed(1)}%, threshold: ${catThresholdPct}%)`
+                : `${nullCatCount} products without category (${nullCatPct.toFixed(1)}%) exceeds threshold of ${catThresholdPct}%`
+        });
+    }
+
+    // 11. UPC format validity — standard UPC is 12 digits, EAN is 13
+    if (isEnabled("upc_format")) {
+        const upcFormatThresholdPct = options?.upcInvalidThresholdPct
+            ?? (process.env.VALIDATION_UPC_INVALID_PCT ? Number(process.env.VALIDATION_UPC_INVALID_PCT) : 1);
+
+        // Products with a UPC that isn't 11-14 digits
+        // (11 = leading-zero-stripped UPC-A, 12 = UPC-A, 13 = EAN-13, 14 = GTIN-14)
+        const invalidUpcResult = await productList.aggregate([
+            { $match: { upc: { $nin: [null, ""] } } },
+            { $match: { upc: { $not: /^\d{11,14}$/ } } },
+            { $count: "total" }
+        ]).toArray();
+        const invalidUpcCount = invalidUpcResult[0]?.total ?? 0;
+        const invalidUpcPct = currentCount > 0 ? (invalidUpcCount / currentCount) * 100 : 0;
+        const upcPassed = invalidUpcPct <= upcFormatThresholdPct;
+
+        checks.push({
+            name: "upc_format",
+            passed: upcPassed,
+            detail: upcPassed
+                ? `${invalidUpcCount} products with non-standard UPC format (${invalidUpcPct.toFixed(2)}%, threshold: ${upcFormatThresholdPct}%)`
+                : `${invalidUpcCount} products with non-standard UPC format (${invalidUpcPct.toFixed(2)}%) exceeds threshold of ${upcFormatThresholdPct}%`
+        });
+    }
+
+    // 12. SKU-UPC consistency across runs — detect products where UPC changed for the same SKU
+    if (isEnabled("sku_upc_consistency") && previousCount > 0) {
+        const consistencyThreshold = options?.skuUpcChangedThreshold
+            ?? (process.env.VALIDATION_SKU_UPC_CHANGED ? Number(process.env.VALIDATION_SKU_UPC_CHANGED) : 50);
+
+        // Find SKUs that exist in both runs but with different UPCs
+        const changedUpcPipeline = [
+            {
+                $lookup: {
+                    from: "product_list_previous",
+                    localField: "normalized_sku",
+                    foreignField: "normalized_sku",
+                    as: "prev"
+                }
+            },
+            { $match: { "prev.0": { $exists: true } } },
+            {
+                $match: {
+                    $expr: {
+                        $and: [
+                            { $ne: [{ $arrayElemAt: ["$prev.upc", 0] }, null] },
+                            { $ne: ["$upc", null] },
+                            { $ne: ["$upc", { $arrayElemAt: ["$prev.upc", 0] }] }
+                        ]
+                    }
+                }
+            },
+            { $count: "total" }
+        ];
+        const changedResult = await productList.aggregate(changedUpcPipeline).toArray();
+        const changedCount = changedResult[0]?.total ?? 0;
+        const consistencyPassed = changedCount <= consistencyThreshold;
+
+        checks.push({
+            name: "sku_upc_consistency",
+            passed: consistencyPassed,
+            detail: consistencyPassed
+                ? `${changedCount} products changed UPC between runs (threshold: ${consistencyThreshold})`
+                : `${changedCount} products changed UPC between runs — exceeds threshold of ${consistencyThreshold}`
+        });
+    }
+
+    // 13. Priority validity — should be a known distributor name
+    if (isEnabled("priority_validity")) {
+        const validPriorities = ["synnex", "dandh", "ingram", "supplies", "suppliesNetwork", "almo", "stocking"];
+        const invalidPriorityCount = await productList.countDocuments({
+            priority: { $nin: [...validPriorities, null] }
+        });
+
+        checks.push({
+            name: "priority_validity",
+            passed: invalidPriorityCount === 0,
+            detail: invalidPriorityCount === 0
+                ? "All products have valid priority values"
+                : `${invalidPriorityCount} products have invalid priority values`
         });
     }
 
