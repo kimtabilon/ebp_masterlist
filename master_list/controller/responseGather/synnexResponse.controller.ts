@@ -369,7 +369,9 @@ export async function buildSynnexResponseTable() {
   const retrySkus = retryDocs.map((d: any) => cleanString(d.sku));
   if (retrySkus.length === 0) return true;
 
-  const retryBatchSize = 20;
+  // Batch 10 has been verified to recover edge-case SKUs (with special chars)
+  // that fail at batch 20+. See SYNNEX_RETRY_BATCH_SIZE override.
+  const retryBatchSize = parseInt(process.env.SYNNEX_RETRY_BATCH_SIZE || "10", 10);
   const retryBatches: string[][] = [];
   for (let i = 0; i < retrySkus.length; i += retryBatchSize) retryBatches.push(retrySkus.slice(i, i + retryBatchSize));
 
