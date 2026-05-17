@@ -1,8 +1,6 @@
 import axios from "axios";
 import { create } from "xmlbuilder2";
 import pLimit from "p-limit";
-import fs from "fs";
-import path from "path";
 import { parseStringPromise } from "xml2js";
 import { getDb } from "../../config/mongdodb.config";
 
@@ -151,44 +149,26 @@ export async function buildSynnexResponseTable() {
   await synnexTable.createIndex({ synnex_price: 1 }).catch(() => { });
   await synnexTable.createIndex({ synnex_quantity: 1 }).catch(() => { });
 
-  const BUFFER_DIR = path.resolve("buffer");
-  const BUFFER_FILE = path.join(BUFFER_DIR, "synnex_buffer.jsonl");
-  fs.mkdirSync(BUFFER_DIR, { recursive: true });
-  fs.writeFileSync(BUFFER_FILE, "");
-
-  const BUFFER_LIMIT = 1000;
-  let bufferCount = 0;
   let totalInserted = 0;
 
-  async function flushBuffer() {
+  // Per-batch docs collected in memory, then insertMany once per batch.
+  // Replaces the previous file-based buffer which had a race condition
+  // between parallel batches that could lose writes.
+  async function insertBatchDocs(docs: any[]) {
+    if (docs.length === 0) return;
     try {
-      const raw = fs.readFileSync(BUFFER_FILE, "utf8").trim();
-      if (!raw) {
-        bufferCount = 0;
-        return;
-      }
-
-      const docs = raw.split("\n").map((l) => JSON.parse(l));
-
-      await synnexTable.insertMany(docs, { ordered: false }).catch((err: any) => {
-        if (err?.code !== 11000) throw err;
-      });
-
+      await synnexTable.insertMany(docs, { ordered: false });
       totalInserted += docs.length;
-      bufferCount = 0;
-      fs.writeFileSync(BUFFER_FILE, "");
     } catch (err: any) {
+      // ordered:false → MongoDB still inserts non-duplicates; we only ignore E11000.
       const msg = err?.message || String(err);
-      if (!/E11000|duplicate key/i.test(msg)) console.log("flushBuffer error:", msg);
-      bufferCount = 0;
-      fs.writeFileSync(BUFFER_FILE, "");
+      if (!/E11000|duplicate key/i.test(msg)) {
+        console.log("Synnex insertMany error:", msg);
+      } else {
+        // Count successful inserts even when some were duplicates
+        totalInserted += (err.result?.nInserted ?? docs.length);
+      }
     }
-  }
-
-  async function writeToBuffer(doc: any) {
-    fs.appendFileSync(BUFFER_FILE, JSON.stringify(doc) + "\n");
-    bufferCount++;
-    if (bufferCount >= BUFFER_LIMIT) await flushBuffer();
   }
 
   const groupedCursor = db.collection("grouped_upc_data").find();
@@ -256,6 +236,7 @@ export async function buildSynnexResponseTable() {
       limit(async () => {
         batchIndex++;
         const bn = batchIndex;
+        const batchDocs: any[] = [];
 
         let xmlData = "";
         try {
@@ -264,7 +245,7 @@ export async function buildSynnexResponseTable() {
           for (const skuRaw of batch) {
             const sku = cleanString(skuRaw);
             const meta = skuMeta[sku];
-            await writeToBuffer({
+            batchDocs.push({
               sku,
               raw_sku: sku,
               normalized_sku: cleanString(meta?.normalized_sku),
@@ -280,7 +261,7 @@ export async function buildSynnexResponseTable() {
               updated_at: now,
             });
           }
-          // await flushBuffer();
+          await insertBatchDocs(batchDocs);
           return;
         }
 
@@ -316,7 +297,7 @@ export async function buildSynnexResponseTable() {
 
           const meta = skuMeta[sku];
 
-          await writeToBuffer({
+          batchDocs.push({
             sku,
             raw_sku: sku,
             normalized_sku: cleanString(meta?.normalized_sku ?? sku),
@@ -337,7 +318,7 @@ export async function buildSynnexResponseTable() {
           const sku = cleanString(skuRaw);
           if (!parsedSkus.has(sku)) {
             const meta = skuMeta[sku];
-            await writeToBuffer({
+            batchDocs.push({
               sku,
               raw_sku: sku,
               normalized_sku: cleanString(meta?.normalized_sku),
@@ -355,13 +336,10 @@ export async function buildSynnexResponseTable() {
           }
         }
 
+        await insertBatchDocs(batchDocs);
       })
     )
   );
-
-  // Flush remaining buffer before retry — otherwise SKUs written as "missing"
-  // at end of main pass won't be in the DB yet, and retry pass will miss them.
-  await flushBuffer();
 
   const retryDocs = await synnexTable
     .find({ synnex_status: { $in: ["missing", "error"] } }, { projection: { sku: 1 } })
