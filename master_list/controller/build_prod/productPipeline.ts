@@ -904,46 +904,41 @@ async function enrichAndInsertBatch(
       created_at: now, updated_at: now,
     };
 
-    // Apply response data per distributor.
     // Only add a distributor to distributor_list if we have actual response data
-    // (response array OR a non-null price). Entries with status "missing_final" or
-    // "error" have null response/price — treating them as "fulfillable" misrepresents
-    // what the distributor can actually deliver.
-    // TODO(EBP-42): revisit with fallback strategy (raw file price OR last-known-good
-    // from product_list_previous) — may want to retry until we have data, or carry
-    // forward stale prices with an indicator. See EBP-39 staging test findings.
-    const hasData = (resp: any, price: any) =>
-      (Array.isArray(resp) && resp.length > 0) || (price !== null && price !== undefined);
+    // (parsed response array present). Entries with status "missing_final" or "error"
+    // have null response — treating them as "fulfillable" misrepresents capability.
+    // See EBP-42 for revisit (fallback strategies: raw file price, last-known-good).
+    const hasResponse = (resp: any) => Array.isArray(resp) && resp.length > 0;
 
     if (synnex) {
       doc.synnex_response = Array.isArray(synnex.synnex_response) ? synnex.synnex_response : null;
       doc.synnex_price = synnex.synnex_price ?? synnex.price ?? null;
       doc.synnex_quantity = synnex.synnex_quantity ?? synnex.quantity ?? null;
-      if (hasData(doc.synnex_response, doc.synnex_price)) distributorList.push("synnex");
+      if (hasResponse(doc.synnex_response)) distributorList.push("synnex");
     }
     if (dandh) {
       doc.dandh_response = dandh.dandh_response ?? dandh.response ?? null;
       doc.dandh_price = dandh.dandh_price ?? dandh.price ?? null;
       doc.dandh_quantity = dandh.dandh_quantity ?? dandh.quantity ?? null;
-      if (hasData(doc.dandh_response, doc.dandh_price)) distributorList.push("dandh");
+      if (hasResponse(doc.dandh_response)) distributorList.push("dandh");
     }
     if (ingram) {
       doc.ingram_response = ingram.ingram_response ?? ingram.response ?? null;
       doc.ingram_price = ingram.ingram_price ?? ingram.price ?? null;
       doc.ingram_quantity = ingram.ingram_quantity ?? ingram.quantity ?? null;
-      if (hasData(doc.ingram_response, doc.ingram_price)) distributorList.push("ingram");
+      if (hasResponse(doc.ingram_response)) distributorList.push("ingram");
     }
     if (supplies) {
       doc.supplies_response = supplies.supplies_response ?? supplies.response ?? null;
       doc.supplies_price = supplies.supplies_price ?? supplies.price ?? null;
       doc.supplies_count = supplies.supplies_count ?? supplies.count ?? null;
-      if (hasData(doc.supplies_response, doc.supplies_price)) distributorList.push("supplies");
+      if (hasResponse(doc.supplies_response)) distributorList.push("supplies");
     }
     if (almo) {
       doc.almo_response = almo.almo_response ?? almo.response ?? null;
       doc.almo_price = almo.almo_price ?? almo.price ?? null;
       doc.almo_quantity = almo.almo_count ?? almo.quantity ?? null;
-      if (hasData(doc.almo_response, doc.almo_price)) distributorList.push("almo");
+      if (hasResponse(doc.almo_response)) distributorList.push("almo");
     }
 
     // Categories from raw (Synnex priority, then D&H)

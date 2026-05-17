@@ -107,11 +107,13 @@ function formatParsedNode(n: any) {
  * Replaces per-SKU parseStringPromise calls.
  */
 async function parseFullResponse(modifiedXmlBySku: Record<string, string[]>): Promise<Record<string, any[]>> {
+  const skuList = Object.keys(modifiedXmlBySku);
   const allXml = Object.values(modifiedXmlBySku).flat().join("\n");
   if (!allXml.trim()) return {};
 
+  // Try batch parse first (fast path)
   const wrapped = `<Root>${allXml}</Root>`;
-  let parsed: any;
+  let parsed: any = null;
   try {
     parsed = await parseStringPromise(wrapped, {
       explicitArray: false,
@@ -121,19 +123,44 @@ async function parseFullResponse(modifiedXmlBySku: Record<string, string[]>): Pr
       explicitRoot: false,
     });
   } catch {
-    return {};
+    parsed = null;
   }
-
-  const listsRaw = parsed?.PriceAvailabilityList;
-  const lists = Array.isArray(listsRaw) ? listsRaw : listsRaw ? [listsRaw] : [];
 
   const result: Record<string, any[]> = {};
-  for (const n of lists) {
-    const sku = cleanString(firstText(n?.mfgPN));
-    if (!sku) continue;
-    if (!result[sku]) result[sku] = [];
-    result[sku].push(formatParsedNode(n));
+  if (parsed) {
+    const listsRaw = parsed?.PriceAvailabilityList;
+    const lists = Array.isArray(listsRaw) ? listsRaw : listsRaw ? [listsRaw] : [];
+    for (const n of lists) {
+      const sku = cleanString(firstText(n?.mfgPN));
+      if (!sku) continue;
+      if (!result[sku]) result[sku] = [];
+      result[sku].push(formatParsedNode(n));
+    }
   }
+
+  // Fallback: for any SKU not found in batch parse, try parsing its XML individually.
+  // The batch parse can fail or skip SKUs due to XML formatting quirks; per-SKU
+  // parsing is slower but more reliable.
+  for (const sku of skuList) {
+    if (result[sku]) continue;
+    const xmlForSku = modifiedXmlBySku[sku].join("\n");
+    try {
+      const perSkuParsed: any = await parseStringPromise(`<Root>${xmlForSku}</Root>`, {
+        explicitArray: false,
+        ignoreAttrs: false,
+        trim: true,
+        normalize: true,
+        explicitRoot: false,
+      });
+      const listsRaw = perSkuParsed?.PriceAvailabilityList;
+      const lists = Array.isArray(listsRaw) ? listsRaw : listsRaw ? [listsRaw] : [];
+      const nodes = lists.map((n: any) => formatParsedNode(n));
+      if (nodes.length > 0) result[sku] = nodes;
+    } catch {
+      // skip — leave result[sku] unset; doc will end up with synnex_response: null
+    }
+  }
+
   return result;
 }
 
