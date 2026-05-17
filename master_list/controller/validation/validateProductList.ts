@@ -52,6 +52,12 @@ export async function validateProductList(options?: {
     const currentCount = await productList.countDocuments();
     const previousCount = await previousList.countDocuments();
 
+    // Ensure index on product_list_previous.normalized_sku for $lookup performance
+    // (sku_upc_consistency check joins against it; without index it does COLLSCAN)
+    if (previousCount > 0) {
+        await previousList.createIndex({ normalized_sku: 1 }).catch(() => {});
+    }
+
     if (isEnabled("product_count")) {
         if (previousCount > 0) {
             const pctChange = Math.abs(currentCount - previousCount) / previousCount * 100;
