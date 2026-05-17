@@ -2,6 +2,7 @@ import path from "path";
 import XLSX from "xlsx";
 import { Request, Response } from "express";
 import { getDb } from "../../config/mongdodb.config";
+import { config } from "../../config/env";
 
 /* ============================
    Helpers
@@ -23,11 +24,8 @@ function toNumber(val: any): number {
 
 export const importAlmoRaw = async () => {
     try {
-        // 🔹 Adjust path if needed
-        const filePath = path.join(
-            process.cwd(),
-            "master_list/raw/almo.xlsx"
-        );
+        const almoPath = config.paths.almoFile();
+        const filePath = path.isAbsolute(almoPath) ? almoPath : path.join(process.cwd(), almoPath);
 
         console.log("Reading file:", filePath);
 
