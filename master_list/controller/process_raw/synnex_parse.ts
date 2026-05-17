@@ -323,8 +323,14 @@ async function removeDuplicates() {
     const db: any = await getDb('master_list');
     const col = db.collection("dist_synnex_raw");
 
-    // Skip non-unique index creation — dedup uses aggregation with allowDiskUse,
-    // and we'll create the unique index once after dedup completes.
+    // Create non-unique index on sku to speed up the dedup aggregation's $sort/$group
+    // and the bulkWrite delete operations (each delete filters by sku).
+    try {
+        await col.createIndex({ sku: 1 });
+        console.log("✔ Non-unique index on sku created (speeds up dedup)");
+    } catch (e: any) {
+        console.log("ℹ Couldn't create non-unique sku index:", e?.message || e);
+    }
 
     // Pipeline finds SKUs with more than 1 document and returns keep (latest) only.
     const pipeline = [
@@ -396,6 +402,13 @@ async function removeDuplicates() {
 async function rebuildIndex() {
     const db: any = await getDb('master_list');
     const col = db.collection("dist_synnex_raw");
+
+    // Drop the non-unique sku index created during dedup before recreating as unique
+    try {
+        await col.dropIndex("sku_1");
+    } catch (e: any) {
+        if (!/not found/i.test(e.message)) console.log("ℹ dropIndex issue:", e.message);
+    }
 
     console.log("🔧 Creating UNIQUE index on sku...");
     await col.createIndex({ sku: 1 }, { unique: true });
