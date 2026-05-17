@@ -423,12 +423,10 @@ export async function buildSynnexResponseTable() {
           const totalQtyAcrossNodes = entry.nodes.reduce((acc, n) => acc + (n.qty || 0), 0);
           const combinedXml = entry.nodes.map((n) => n.xml).join("\n");
 
-          let synnexResponse: any = null;
-          try {
-            synnexResponse = await synnexPriceAvailabilityListOnly(combinedXml);
-          } catch {
-            synnexResponse = null;
-          }
+          // Use parseFullResponse with a single-SKU map; the per-SKU fallback
+          // inside it ensures we get a structured response even if the batch parse fails.
+          const parsedMap = await parseFullResponse({ [sku]: entry.nodes.map((n) => n.xml) });
+          const synnexResponse = parsedMap[sku] ?? null;
 
           await synnexTable.updateOne(
             { sku: cleanString(sku) },
