@@ -355,12 +355,13 @@ export async function buildSynnexResponseTable() {
           }
         }
 
-        // if (bn % 1 === 0) await flushBuffer();
       })
     )
   );
 
-  // await flushBuffer();
+  // Flush remaining buffer before retry — otherwise SKUs written as "missing"
+  // at end of main pass won't be in the DB yet, and retry pass will miss them.
+  await flushBuffer();
 
   const retryDocs = await synnexTable
     .find({ synnex_status: { $in: ["missing", "error"] } }, { projection: { sku: 1 } })
@@ -449,8 +450,6 @@ export async function buildSynnexResponseTable() {
       })
     )
   );
-
-  // await flushBuffer();
 
   return true;
 }
