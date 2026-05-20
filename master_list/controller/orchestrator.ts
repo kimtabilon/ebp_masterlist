@@ -369,4 +369,20 @@ export async function runPipeline(options?: OrchestratorOptions): Promise<void> 
     logPipelineSummary("completed", totalDurationSec, runLog["stages"].length, {
         resumed: isResumed,
     });
+
+    // Notify on successful completion (Slack/webhook)
+    let productCount: number | undefined;
+    try {
+        const db = await getDb("master_list");
+        productCount = await db.collection("product_list").countDocuments();
+    } catch {
+        // best-effort — don't fail the run if the count query has issues
+    }
+    await sendPipelineAlert({
+        type: "pipeline_success",
+        validation,
+        diff,
+        durationSec: totalDurationSec,
+        productCount,
+    }).catch(() => {});
 }

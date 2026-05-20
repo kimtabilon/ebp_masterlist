@@ -3,29 +3,36 @@ import { ValidationResult } from "./validateProductList";
 import { DiffResult } from "./diffProductList";
 
 /**
- * Send an alert when validation fails or anomalous data is detected.
+ * Send an alert when the pipeline succeeds, fails validation, or errors out.
  *
  * Supports Slack webhook (default) via ALERT_SLACK_WEBHOOK_URL env var.
  * Falls back to console logging if no webhook is configured.
  */
 export async function sendPipelineAlert(options: {
-    type: "validation_failed" | "anomaly_detected" | "pipeline_error";
+    type: "pipeline_success" | "validation_failed" | "anomaly_detected" | "pipeline_error";
     validation?: ValidationResult | null;
     diff?: DiffResult | null;
     error?: string | null;
+    durationSec?: number;
+    productCount?: number;
 }): Promise<void> {
     const webhookUrl = process.env.ALERT_SLACK_WEBHOOK_URL;
+    const isSuccess = options.type === "pipeline_success";
 
     const message = formatAlertMessage(options);
+    const icon = isSuccess ? "✅" : "🚨";
+    const label = isSuccess ? "Pipeline Run" : "Pipeline Alert";
 
-    // Always log to console
-    console.error(`🚨 PIPELINE ALERT [${options.type}]:\n${message}`);
+    if (isSuccess) {
+        console.log(`${icon} ${label} [${options.type}]:\n${message}`);
+    } else {
+        console.error(`${icon} ${label} [${options.type}]:\n${message}`);
+    }
 
-    // Send to Slack if configured
     if (webhookUrl) {
         try {
             await axios.post(webhookUrl, {
-                text: `🚨 *Pipeline Alert: ${formatAlertType(options.type)}*\n${message}`,
+                text: `${icon} *${label}: ${formatAlertType(options.type)}*\n${message}`,
             });
             console.log("✅ Alert sent to Slack");
         } catch (err: any) {
@@ -38,6 +45,7 @@ export async function sendPipelineAlert(options: {
 
 function formatAlertType(type: string): string {
     switch (type) {
+        case "pipeline_success": return "Success";
         case "validation_failed": return "Validation Failed";
         case "anomaly_detected": return "Anomaly Detected";
         case "pipeline_error": return "Pipeline Error";
@@ -50,11 +58,23 @@ function formatAlertMessage(options: {
     validation?: ValidationResult | null;
     diff?: DiffResult | null;
     error?: string | null;
+    durationSec?: number;
+    productCount?: number;
 }): string {
     const lines: string[] = [];
 
     if (options.error) {
         lines.push(`Error: ${options.error}`);
+    }
+
+    if (options.durationSec !== undefined) {
+        const mins = Math.floor(options.durationSec / 60);
+        const secs = Math.round(options.durationSec % 60);
+        lines.push(`Duration: ${mins}m ${secs}s`);
+    }
+
+    if (options.productCount !== undefined) {
+        lines.push(`Products: ${options.productCount.toLocaleString()}`);
     }
 
     if (options.validation) {
@@ -64,6 +84,8 @@ function formatAlertMessage(options: {
             for (const check of failed) {
                 lines.push(`  • ${check.name}: ${check.detail}`);
             }
+        } else if (options.type === "pipeline_success") {
+            lines.push(`Validation: all ${options.validation.checks.length} checks passed`);
         }
     }
 
