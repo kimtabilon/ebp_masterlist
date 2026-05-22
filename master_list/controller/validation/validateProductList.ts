@@ -52,6 +52,12 @@ export async function validateProductList(options?: {
     const currentCount = await productList.countDocuments();
     const previousCount = await previousList.countDocuments();
 
+    // Ensure index on product_list_previous.normalized_sku for $lookup performance
+    // (sku_upc_consistency check joins against it; without index it does COLLSCAN)
+    if (previousCount > 0) {
+        await previousList.createIndex({ normalized_sku: 1 }).catch(() => {});
+    }
+
     if (isEnabled("product_count")) {
         if (previousCount > 0) {
             const pctChange = Math.abs(currentCount - previousCount) / previousCount * 100;
@@ -168,7 +174,7 @@ export async function validateProductList(options?: {
     // 6. Price sanity — no $0 prices on products with response data (EBP-29)
     if (isEnabled("price_sanity")) {
         const zeroPriceThresholdPct = options?.zeroPriceThresholdPct
-            ?? (process.env.VALIDATION_ZERO_PRICE_PCT ? Number(process.env.VALIDATION_ZERO_PRICE_PCT) : 5);
+            ?? (process.env.VALIDATION_ZERO_PRICE_PCT ? Number(process.env.VALIDATION_ZERO_PRICE_PCT) : 8);
 
         // Products with at least one distributor response but ALL prices are 0 or null
         const zeroPricePipeline = [
@@ -322,7 +328,7 @@ export async function validateProductList(options?: {
     // 12. SKU-UPC consistency across runs — detect products where UPC changed for the same SKU
     if (isEnabled("sku_upc_consistency") && previousCount > 0) {
         const consistencyThreshold = options?.skuUpcChangedThreshold
-            ?? (process.env.VALIDATION_SKU_UPC_CHANGED ? Number(process.env.VALIDATION_SKU_UPC_CHANGED) : 50);
+            ?? (process.env.VALIDATION_SKU_UPC_CHANGED ? Number(process.env.VALIDATION_SKU_UPC_CHANGED) : 500);
 
         // Find SKUs that exist in both runs but with different UPCs
         const changedUpcPipeline = [

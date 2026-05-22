@@ -15,9 +15,26 @@ export const buildGroupedUpcData = async (
         // 1️⃣ Empty grouped table first
         await targetCol.deleteMany({});
 
+        // Pre-load small exclusion sets (same_sku typically 0, same_upc ~4.5k)
+        const excludeIds = [
+            ...(await db.collection("filter_same_upc").find({}, { projection: { _id: 1 } }).toArray()).map(d => d._id),
+            ...(await db.collection("filter_same_sku").find({}, { projection: { _id: 1 } }).toArray()).map(d => d._id),
+        ];
+        console.log(`📋 Pre-loaded ${excludeIds.length} exclusion IDs (same_upc + same_sku)`);
+
         await rawCol.aggregate(
             [
-                // 🔎 Exclude rows already in filter tables
+                // 🔎 Filter by UPC first — eliminates ~78% of rows before lookups
+                // Also exclude small filter tables via pre-loaded $nin
+                {
+                    $match: {
+                        normalized_upc: { $nin: [null, ""] },
+                        ...(excludeIds.length > 0 ? { _id: { $nin: excludeIds } } : {}),
+                    }
+                },
+
+                // 🔎 Exclude rows in filter_null_manufacturer (~269k rows after UPC filter)
+                // filter_null_upc lookup removed — 0 overlap with rows that have a UPC
                 {
                     $lookup: {
                         from: "filter_null_manufacturer",
@@ -27,36 +44,8 @@ export const buildGroupedUpcData = async (
                     }
                 },
                 {
-                    $lookup: {
-                        from: "filter_null_upc",
-                        localField: "_id",
-                        foreignField: "_id",
-                        as: "inNullUpc"
-                    }
-                },
-                {
-                    $lookup: {
-                        from: "filter_same_sku",
-                        localField: "_id",
-                        foreignField: "_id",
-                        as: "inSameSku"
-                    }
-                },
-                {
-                    $lookup: {
-                        from: "filter_same_upc",
-                        localField: "_id",
-                        foreignField: "_id",
-                        as: "inSameUpc"
-                    }
-                },
-                {
                     $match: {
                         inNullManufacturer: { $size: 0 },
-                        inNullUpc: { $size: 0 },
-                        inSameSku: { $size: 0 },
-                        inSameUpc: { $size: 0 },
-                        normalized_upc: { $nin: [null, ""] }
                     }
                 },
 

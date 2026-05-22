@@ -127,6 +127,7 @@ export const config = {
         rawDir: () => optional("RAW_DIR", "master_list/raw"),
         bufferDir: () => optional("BUFFER_DIR", "src/raw"),
         manufacturerMap: () => optional("MANUFACTURER_MAP_PATH", "src/raw/manufacturer report.xlsx"),
+        almoFile: () => optional("ALMO_FILE_PATH", "master_list/raw/almo.xlsx"),
     },
 
     // Pipeline thresholds

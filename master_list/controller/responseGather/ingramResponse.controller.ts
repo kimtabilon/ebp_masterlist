@@ -209,6 +209,7 @@ export async function buildIngramResponseTable() {
         let attempt = 0;
         const maxAttempts = 25;
         let ok = false;
+        let retryDelay = 1000;
 
         while (attempt < maxAttempts && !ok) {
           attempt++;
@@ -216,9 +217,11 @@ export async function buildIngramResponseTable() {
             const { data, status } = await callIngramAPI(batch);
 
             if (status === 429 || data?.status === 429 || data?.error) {
-              await new Promise((r) => setTimeout(r, 3000));
+              await new Promise((r) => setTimeout(r, retryDelay + Math.random() * 1000));
+              retryDelay = Math.min(retryDelay * 1.5, 8000);
               continue;
             }
+            retryDelay = 1000; // reset on success
 
             const products = Array.isArray(data) ? data : data?.products ?? [];
 
@@ -347,7 +350,8 @@ export async function buildIngramResponseTable() {
             // await flushBuffer(false);
           } catch (err: any) {
             console.log(`❌ Batch ${bn} attempt ${attempt} failed:`, err?.message || err);
-            await new Promise((r) => setTimeout(r, 3000));
+            await new Promise((r) => setTimeout(r, retryDelay + Math.random() * 1000));
+            retryDelay = Math.min(retryDelay * 1.5, 8000);
           }
         }
 

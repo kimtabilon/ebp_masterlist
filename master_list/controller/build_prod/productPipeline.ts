@@ -725,11 +725,11 @@ export async function buildProductListStreaming() {
   await productList.createIndex({ normalized_sku: 1 }, { unique: true });
   await productList.createIndex({ sku: 1 });
 
-  // Ensure indexes on raw collections for enrichment lookups
-  await db.collection("dist_synnex_raw").createIndex({ normalized_sku: 1 });
-  await db.collection("dist_dandh_raw").createIndex({ sku: 1 });
-  await db.collection("dist_ingram_raw").createIndex({ sku: 1 });
-  await db.collection("dist_supplies_raw").createIndex({ sku: 1 });
+  // Ensure indexes on raw collections for enrichment lookups (may already exist from import stage)
+  await db.collection("dist_synnex_raw").createIndex({ normalized_sku: 1 }).catch(() => {});
+  await db.collection("dist_dandh_raw").createIndex({ sku: 1 }).catch(() => {});
+  await db.collection("dist_ingram_raw").createIndex({ sku: 1 }).catch(() => {});
+  await db.collection("dist_supplies_raw").createIndex({ sku: 1 }).catch(() => {});
 
   const now = new Date();
   let inserted = 0;
@@ -904,12 +904,18 @@ async function enrichAndInsertBatch(
       created_at: now, updated_at: now,
     };
 
-    // Apply response data per distributor (same logic as original)
+    // For Synnex: only add to distributor_list if response has data. This filters
+    // out missing_final/error entries that would otherwise misrepresent fulfillment.
+    // For other distributors: their response_table only includes successful lookups
+    // (no missing_final pattern), so always add if the row exists.
+    // See EBP-42 for revisit (consistent filtering with fallback strategies).
     if (synnex) {
       doc.synnex_response = Array.isArray(synnex.synnex_response) ? synnex.synnex_response : null;
       doc.synnex_price = synnex.synnex_price ?? synnex.price ?? null;
       doc.synnex_quantity = synnex.synnex_quantity ?? synnex.quantity ?? null;
-      distributorList.push("synnex");
+      if (Array.isArray(doc.synnex_response) && doc.synnex_response.length > 0) {
+        distributorList.push("synnex");
+      }
     }
     if (dandh) {
       doc.dandh_response = dandh.dandh_response ?? dandh.response ?? null;
@@ -1350,9 +1356,12 @@ export async function fixMissingCategoriesFastv3(): Promise<{ updated: number }>
   }
 
   // -------------------- RUN ALL --------------------
-  await updateCategoryFromDistributor("supplies", "category_supplies");
-  await updateCategoryFromDistributor("ingram", "category_ingram");
-  await updateCategoryFromDistributor("dandh", "category_dandh");
+  // These write to separate fields — safe to parallelize
+  await Promise.all([
+    updateCategoryFromDistributor("supplies", "category_supplies"),
+    updateCategoryFromDistributor("ingram", "category_ingram"),
+    updateCategoryFromDistributor("dandh", "category_dandh"),
+  ]);
 
   console.time("CATEGORY_PROPAGATION_MERGE");
   await propagateCategoryFromField("category_supplies");

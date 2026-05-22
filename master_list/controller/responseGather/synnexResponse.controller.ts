@@ -1,8 +1,6 @@
 import axios from "axios";
 import { create } from "xmlbuilder2";
 import pLimit from "p-limit";
-import fs from "fs";
-import path from "path";
 import { parseStringPromise } from "xml2js";
 import { getDb } from "../../config/mongdodb.config";
 
@@ -78,44 +76,92 @@ function processPriceAvailabilityNode(nodeXmlRaw: string) {
   return { sku, price, totalQty: totalQtyFromWarehouses, modifiedXml: modifiedNodeXml };
 }
 
-async function synnexPriceAvailabilityListOnly(combinedXml: string) {
-  const wrapped = `<Root>${combinedXml}</Root>`;
-  const parsed: any = await parseStringPromise(wrapped, {
-    explicitArray: false,
-    ignoreAttrs: false,
-    trim: true,
-    normalize: true,
-    explicitRoot: false,
-  });
+function formatParsedNode(n: any) {
+  const whRaw = n?.AvailabilityByWarehouse;
+  const warehouses = Array.isArray(whRaw) ? whRaw : whRaw ? [whRaw] : [];
 
-  const listsRaw = parsed?.PriceAvailabilityList;
-  const lists = Array.isArray(listsRaw) ? listsRaw : listsRaw ? [listsRaw] : [];
+  return {
+    synnexSKU: firstText(n?.synnexSKU),
+    mfgPN: firstText(n?.mfgPN),
+    mfgCode: firstText(n?.mfgCode),
+    status: firstText(n?.status),
+    description: firstText(n?.description),
+    GlobalProductStatusCode: firstText(n?.GlobalProductStatusCode),
+    price: toNum(firstText(n?.price)),
+    totalQuantity: toNum(firstText(n?.totalQuantity)) ?? 0,
+    lineNumber: firstText(n?.lineNumber),
+    AvailabilityByWarehouse: warehouses.map((w: any) => ({
+      warehouseInfo: {
+        number: firstText(w?.warehouseInfo?.number),
+        zipcode: firstText(w?.warehouseInfo?.zipcode),
+        city: firstText(w?.warehouseInfo?.city),
+        addr: firstText(w?.warehouseInfo?.addr),
+      },
+      qty: toNum(firstText(w?.qty)) ?? 0,
+    })),
+  };
+}
 
-  return lists.map((n: any) => {
-    const whRaw = n?.AvailabilityByWarehouse;
-    const warehouses = Array.isArray(whRaw) ? whRaw : whRaw ? [whRaw] : [];
+/**
+ * Parse the full API response XML once and return a map of SKU → formatted nodes.
+ * Replaces per-SKU parseStringPromise calls.
+ */
+async function parseFullResponse(modifiedXmlBySku: Record<string, string[]>): Promise<Record<string, any[]>> {
+  const skuList = Object.keys(modifiedXmlBySku);
+  const allXml = Object.values(modifiedXmlBySku).flat().join("\n");
+  if (!allXml.trim()) return {};
 
-    return {
-      synnexSKU: firstText(n?.synnexSKU),
-      mfgPN: firstText(n?.mfgPN),
-      mfgCode: firstText(n?.mfgCode),
-      status: firstText(n?.status),
-      description: firstText(n?.description),
-      GlobalProductStatusCode: firstText(n?.GlobalProductStatusCode),
-      price: toNum(firstText(n?.price)),
-      totalQuantity: toNum(firstText(n?.totalQuantity)) ?? 0,
-      lineNumber: firstText(n?.lineNumber),
-      AvailabilityByWarehouse: warehouses.map((w: any) => ({
-        warehouseInfo: {
-          number: firstText(w?.warehouseInfo?.number),
-          zipcode: firstText(w?.warehouseInfo?.zipcode),
-          city: firstText(w?.warehouseInfo?.city),
-          addr: firstText(w?.warehouseInfo?.addr),
-        },
-        qty: toNum(firstText(w?.qty)) ?? 0,
-      })),
-    };
-  });
+  // Try batch parse first (fast path)
+  const wrapped = `<Root>${allXml}</Root>`;
+  let parsed: any = null;
+  try {
+    parsed = await parseStringPromise(wrapped, {
+      explicitArray: false,
+      ignoreAttrs: false,
+      trim: true,
+      normalize: true,
+      explicitRoot: false,
+    });
+  } catch {
+    parsed = null;
+  }
+
+  const result: Record<string, any[]> = {};
+  if (parsed) {
+    const listsRaw = parsed?.PriceAvailabilityList;
+    const lists = Array.isArray(listsRaw) ? listsRaw : listsRaw ? [listsRaw] : [];
+    for (const n of lists) {
+      const sku = cleanString(firstText(n?.mfgPN));
+      if (!sku) continue;
+      if (!result[sku]) result[sku] = [];
+      result[sku].push(formatParsedNode(n));
+    }
+  }
+
+  // Fallback: for any SKU not found in batch parse, try parsing its XML individually.
+  // The batch parse can fail or skip SKUs due to XML formatting quirks; per-SKU
+  // parsing is slower but more reliable.
+  for (const sku of skuList) {
+    if (result[sku]) continue;
+    const xmlForSku = modifiedXmlBySku[sku].join("\n");
+    try {
+      const perSkuParsed: any = await parseStringPromise(`<Root>${xmlForSku}</Root>`, {
+        explicitArray: false,
+        ignoreAttrs: false,
+        trim: true,
+        normalize: true,
+        explicitRoot: false,
+      });
+      const listsRaw = perSkuParsed?.PriceAvailabilityList;
+      const lists = Array.isArray(listsRaw) ? listsRaw : listsRaw ? [listsRaw] : [];
+      const nodes = lists.map((n: any) => formatParsedNode(n));
+      if (nodes.length > 0) result[sku] = nodes;
+    } catch {
+      // skip — leave result[sku] unset; doc will end up with synnex_response: null
+    }
+  }
+
+  return result;
 }
 
 export async function buildSynnexResponseTable() {
@@ -130,44 +176,26 @@ export async function buildSynnexResponseTable() {
   await synnexTable.createIndex({ synnex_price: 1 }).catch(() => { });
   await synnexTable.createIndex({ synnex_quantity: 1 }).catch(() => { });
 
-  const BUFFER_DIR = path.resolve("buffer");
-  const BUFFER_FILE = path.join(BUFFER_DIR, "synnex_buffer.jsonl");
-  fs.mkdirSync(BUFFER_DIR, { recursive: true });
-  fs.writeFileSync(BUFFER_FILE, "");
-
-  const BUFFER_LIMIT = 1000;
-  let bufferCount = 0;
   let totalInserted = 0;
 
-  async function flushBuffer() {
+  // Per-batch docs collected in memory, then insertMany once per batch.
+  // Replaces the previous file-based buffer which had a race condition
+  // between parallel batches that could lose writes.
+  async function insertBatchDocs(docs: any[]) {
+    if (docs.length === 0) return;
     try {
-      const raw = fs.readFileSync(BUFFER_FILE, "utf8").trim();
-      if (!raw) {
-        bufferCount = 0;
-        return;
-      }
-
-      const docs = raw.split("\n").map((l) => JSON.parse(l));
-
-      await synnexTable.insertMany(docs, { ordered: false }).catch((err: any) => {
-        if (err?.code !== 11000) throw err;
-      });
-
+      await synnexTable.insertMany(docs, { ordered: false });
       totalInserted += docs.length;
-      bufferCount = 0;
-      fs.writeFileSync(BUFFER_FILE, "");
     } catch (err: any) {
+      // ordered:false → MongoDB still inserts non-duplicates; we only ignore E11000.
       const msg = err?.message || String(err);
-      if (!/E11000|duplicate key/i.test(msg)) console.log("flushBuffer error:", msg);
-      bufferCount = 0;
-      fs.writeFileSync(BUFFER_FILE, "");
+      if (!/E11000|duplicate key/i.test(msg)) {
+        console.log("Synnex insertMany error:", msg);
+      } else {
+        // Count successful inserts even when some were duplicates
+        totalInserted += (err.result?.nInserted ?? docs.length);
+      }
     }
-  }
-
-  async function writeToBuffer(doc: any) {
-    fs.appendFileSync(BUFFER_FILE, JSON.stringify(doc) + "\n");
-    bufferCount++;
-    if (bufferCount >= BUFFER_LIMIT) await flushBuffer();
   }
 
   const groupedCursor = db.collection("grouped_upc_data").find();
@@ -204,7 +232,7 @@ export async function buildSynnexResponseTable() {
   if (totalSkuCount === 0) return true;
 
   const allSkus = Object.keys(skuMeta).map(cleanString);
-  const batchSize = 10;
+  const batchSize = parseInt(process.env.SYNNEX_BATCH_SIZE || "50", 10);
   const batches: string[][] = [];
   for (let i = 0; i < allSkus.length; i += batchSize) batches.push(allSkus.slice(i, i + batchSize));
 
@@ -235,6 +263,7 @@ export async function buildSynnexResponseTable() {
       limit(async () => {
         batchIndex++;
         const bn = batchIndex;
+        const batchDocs: any[] = [];
 
         let xmlData = "";
         try {
@@ -243,7 +272,7 @@ export async function buildSynnexResponseTable() {
           for (const skuRaw of batch) {
             const sku = cleanString(skuRaw);
             const meta = skuMeta[sku];
-            await writeToBuffer({
+            batchDocs.push({
               sku,
               raw_sku: sku,
               normalized_sku: cleanString(meta?.normalized_sku),
@@ -259,7 +288,7 @@ export async function buildSynnexResponseTable() {
               updated_at: now,
             });
           }
-          // await flushBuffer();
+          await insertBatchDocs(batchDocs);
           return;
         }
 
@@ -276,6 +305,13 @@ export async function buildSynnexResponseTable() {
           results[sku].nodes.push({ price: processed.price, qty: processed.totalQty, xml: processed.modifiedXml });
         }
 
+        // Single XML parse for the entire batch instead of per-SKU
+        const modifiedXmlBySku: Record<string, string[]> = {};
+        for (const [sku, entry] of Object.entries(results)) {
+          modifiedXmlBySku[sku] = entry.nodes.map((n) => n.xml);
+        }
+        const parsedResponses = await parseFullResponse(modifiedXmlBySku);
+
         for (const skuKey of Object.keys(results)) {
           const sku = cleanString(skuKey);
           const entry = results[sku];
@@ -285,18 +321,10 @@ export async function buildSynnexResponseTable() {
           if (valid.length) lowestPrice = Math.min(...valid.map((x) => x.price as number));
 
           const totalQtyAcrossNodes = entry.nodes.reduce((acc, n) => acc + (n.qty || 0), 0);
-          const combinedXml = entry.nodes.map((n) => n.xml).join("\n");
-
-          let synnexResponse: any = null;
-          try {
-            synnexResponse = await synnexPriceAvailabilityListOnly(combinedXml);
-          } catch {
-            synnexResponse = null;
-          }
 
           const meta = skuMeta[sku];
 
-          await writeToBuffer({
+          batchDocs.push({
             sku,
             raw_sku: sku,
             normalized_sku: cleanString(meta?.normalized_sku ?? sku),
@@ -307,7 +335,7 @@ export async function buildSynnexResponseTable() {
             synnex_status: "ok",
             synnex_price: lowestPrice,
             synnex_quantity: totalQtyAcrossNodes,
-            synnex_response: synnexResponse,
+            synnex_response: parsedResponses[sku] ?? null,
             created_at: now,
             updated_at: now,
           });
@@ -317,7 +345,7 @@ export async function buildSynnexResponseTable() {
           const sku = cleanString(skuRaw);
           if (!parsedSkus.has(sku)) {
             const meta = skuMeta[sku];
-            await writeToBuffer({
+            batchDocs.push({
               sku,
               raw_sku: sku,
               normalized_sku: cleanString(meta?.normalized_sku),
@@ -335,12 +363,10 @@ export async function buildSynnexResponseTable() {
           }
         }
 
-        // if (bn % 1 === 0) await flushBuffer();
+        await insertBatchDocs(batchDocs);
       })
     )
   );
-
-  // await flushBuffer();
 
   const retryDocs = await synnexTable
     .find({ synnex_status: { $in: ["missing", "error"] } }, { projection: { sku: 1 } })
@@ -349,7 +375,9 @@ export async function buildSynnexResponseTable() {
   const retrySkus = retryDocs.map((d: any) => cleanString(d.sku));
   if (retrySkus.length === 0) return true;
 
-  const retryBatchSize = 20;
+  // Batch 10 has been verified to recover edge-case SKUs (with special chars)
+  // that fail at batch 20+. See SYNNEX_RETRY_BATCH_SIZE override.
+  const retryBatchSize = parseInt(process.env.SYNNEX_RETRY_BATCH_SIZE || "10", 10);
   const retryBatches: string[][] = [];
   for (let i = 0; i < retrySkus.length; i += retryBatchSize) retryBatches.push(retrySkus.slice(i, i + retryBatchSize));
 
@@ -395,12 +423,10 @@ export async function buildSynnexResponseTable() {
           const totalQtyAcrossNodes = entry.nodes.reduce((acc, n) => acc + (n.qty || 0), 0);
           const combinedXml = entry.nodes.map((n) => n.xml).join("\n");
 
-          let synnexResponse: any = null;
-          try {
-            synnexResponse = await synnexPriceAvailabilityListOnly(combinedXml);
-          } catch {
-            synnexResponse = null;
-          }
+          // Use parseFullResponse with a single-SKU map; the per-SKU fallback
+          // inside it ensures we get a structured response even if the batch parse fails.
+          const parsedMap = await parseFullResponse({ [sku]: entry.nodes.map((n) => n.xml) });
+          const synnexResponse = parsedMap[sku] ?? null;
 
           await synnexTable.updateOne(
             { sku: cleanString(sku) },
@@ -427,8 +453,6 @@ export async function buildSynnexResponseTable() {
       })
     )
   );
-
-  // await flushBuffer();
 
   return true;
 }

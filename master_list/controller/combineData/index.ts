@@ -3,12 +3,14 @@ import path from "path";
 import XLSX from "xlsx";
 import { Request, Response } from "express";
 import { getDb } from "../../config/mongdodb.config";
+import { config } from "../../config/env";
 import { cleanString, normalizeManufacturer, normalizeUpc as normalizeUPC, normalizeSku } from "../../utils/normalize";
 // ---------------- CONFIG ----------------
-const INSERT_BATCH = 20000;
+const INSERT_BATCH = parseInt(process.env.INSERT_BATCH_SIZE || "50000", 10);
 const LOG_INTERVAL = 200000;
 
-const MANU_FILE = path.join(process.cwd(), "src/raw", "manufacturer report.xlsx");
+const MANU_PATH = config.paths.manufacturerMap();
+const MANU_FILE = path.isAbsolute(MANU_PATH) ? MANU_PATH : path.join(process.cwd(), MANU_PATH);
 
 // ====================================================================
 // STEP 1 — Load Manufacturer Map (Normalized Keys)
