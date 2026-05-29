@@ -83,6 +83,7 @@ export const exportSameSkuToXlsx = async () => {
       },
     }));
 
+    await targetCol.bulkWrite(bulkOps, { ordered: false });
 
     // const fileName = `filter_same_sku_${Date.now()}.xlsx`;
 
